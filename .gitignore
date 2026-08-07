@@ -28,9 +28,11 @@ static/
 
 # --- Состояние, а не исходники ---
 # storage/ — база Qdrant
+# cache/   — кэш векторов, пересчитывается за секунды
 storage/
 snapshots/
 logs/
+cache/
 .qdrant-initialized
 
 # --- Python ---
