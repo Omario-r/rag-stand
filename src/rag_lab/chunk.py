@@ -83,14 +83,23 @@ def tokens_via_server(embedder) -> "callable":
 # --- распознавание структуры ---
 
 # Заголовок раздела: "## 4. ОТВЕТСТВЕННОСТЬ СТОРОН" или "## Статья 3. Название"
-RE_SECTION = re.compile(r"^#{1,6}\s+(?:(Статья|Раздел|Приложение)\s+)?(\d+)\.?\s*(.*)$")
+RE_SECTION = re.compile(r"^#{1,6}\s+(?:(Статья|Раздел)\s+)?(\d+)\.?\s*(.*)$")
+# Заголовок приложения: "# Приложение № 1 к Договору ..." — начинает новую
+# часть документа. Приложение живёт под тем же doc_id: юрист ищет
+# «по договору», а не «по файлу» (RAG/02-chunking.md).
+RE_APPENDIX = re.compile(r"^#{1,6}\s+Приложение\s*№?\s*(\d+)")
 # Заголовок документа: единственная "# ..." в начале файла
 RE_TITLE = re.compile(r"^#\s+(?!\d)(.+)$")
 # Номер пункта в начале абзаца: "4.2." / "3.4.3.1." / "17." — точка в конце
 # необязательна, но точки внутри обязаны разделять только цифры.
 RE_CLAUSE = re.compile(r"^(\d+(?:\.\d+)*)\.?\s+(?=[«А-ЯЁA-Z])")
+# Пункт приложения: "П.1." — своя нумерация, не пересекается с договором
+RE_CLAUSE_APP = re.compile(r"^П\.(\d+)\.?\s+(?=[«А-ЯЁA-Z])")
 # Строка таблицы Markdown
 RE_TABLE = re.compile(r"^\s*\|")
+# Разделы, которые не идут в векторный индекс: реквизиты и подписи шумят
+# и тянут на себя похожие запросы, их место — SQL (RAG/02-chunking.md)
+RE_NOT_INDEXED = re.compile(r"реквизит|подписи\s+сторон", re.I)
 
 
 @dataclass
@@ -105,6 +114,8 @@ class Clause:
     parent: str = ""  # number родителя, "" у верхнего уровня
     has_table: bool = False
     children: list[str] = field(default_factory=list)
+    part: str = "договор"  # "договор" или "приложение N"
+    indexed: bool = True  # False у реквизитов и подписей
 
     @property
     def is_sequential(self) -> bool:
@@ -122,6 +133,85 @@ def parse(path: str | Path) -> tuple[str, list[Clause]]:
     Дерево задаётся полями `parent`/`children`, а не вложенностью: так проще
     и сериализовать в payload, и обходить.
     """
+    path = Path(path)
+    if path.suffix == ".docx":
+        return parse_docx(path)
+    return parse_markdown(path)
+
+
+# Стили, которыми размечен SH-45. Word показывает номера, потому что стиль
+# несёт numPr; в извлечённом тексте номеров нет ни одного.
+DOCX_SECTION_STYLE = "List Number"
+DOCX_CLAUSE_STYLE = "List Number 2"
+
+
+def parse_docx(path: str | Path) -> tuple[str, list[Clause]]:
+    """Разбор .docx с автонумерацией Word — номера восстанавливаются позиционно.
+
+    Главная ловушка корпуса. В `SH-45` нумерация задана стилями (`numPr`,
+    numId 5 и 6), поэтому Word номера рисует, а `python-docx` возвращает
+    31 пункт, из которых ни один не начинается с цифры.
+
+    Номера из стилей НЕ восстанавливаем, хотя технически могли бы: в файле
+    они плоские — две независимые последовательности на два уровня, а не
+    иерархические `4.2`. Восстановленный номер разошёлся бы с тем, что Word
+    показывает юристу на экране, а неверная ссылка хуже отсутствующей.
+
+    Вместо этого адрес позиционный, ровно как задано в `corpus/golden-set.yaml`:
+    `<порядковый номер раздела>.<порядковый номер пункта в разделе>`.
+
+    Реквизиты и подписи (стиль Normal после последнего раздела) в пункты
+    не попадают: они шумят и тянут на себя похожие запросы, их место — SQL
+    (RAG/02-chunking.md).
+    """
+    from docx import Document  # локально: markdown-ветка не должна тянуть зависимость
+
+    doc = Document(str(path))
+    doc_title = ""
+    section_no = 0
+    clause_no = 0
+    section_title = ""
+    clauses: list[Clause] = []
+
+    for par in doc.paragraphs:
+        text = par.text.strip()
+        if not text:
+            continue
+        style = par.style.name
+
+        if style == DOCX_SECTION_STYLE:
+            section_no += 1
+            clause_no = 0
+            section_title = text
+            continue
+
+        if style == DOCX_CLAUSE_STYLE:
+            if section_no == 0:
+                # пункт до первого раздела — структура файла не та, что ожидали
+                raise ValueError(f"{path}: пункт до первого раздела: {text[:60]!r}")
+            clause_no += 1
+            clauses.append(
+                Clause(
+                    number=f"{section_no}.{clause_no}",
+                    text=text,
+                    section_no=str(section_no),
+                    section_title=section_title,
+                    level=2,
+                    parent="",  # родитель — раздел, а не пункт
+                )
+            )
+            continue
+
+        # Normal: заголовок документа — первый непустой; остальное (место,
+        # дата, преамбула, реквизиты) в пункты не идёт
+        if not doc_title:
+            doc_title = text
+
+    return doc_title, clauses
+
+
+def parse_markdown(path: str | Path) -> tuple[str, list[Clause]]:
+    """Разбор договора в markdown: номера пунктов есть прямо в тексте."""
     lines = Path(path).read_text(encoding="utf-8").splitlines()
 
     doc_title = ""
@@ -137,7 +227,15 @@ def parse(path: str | Path) -> tuple[str, list[Clause]]:
             clauses.append(current)
         current, buf = None, []
 
+    part = "договор"
+
     for line in lines:
+        if m := RE_APPENDIX.match(line):
+            flush()
+            part = f"приложение {m.group(1)}"
+            section_no, section_title = "", ""
+            continue
+
         if not doc_title and (m := RE_TITLE.match(line)):
             doc_title = m.group(1).strip()
             continue
@@ -147,16 +245,22 @@ def parse(path: str | Path) -> tuple[str, list[Clause]]:
             section_no, section_title = m.group(2), m.group(3).strip()
             continue
 
-        if m := RE_CLAUSE.match(line):
+        if m := (RE_CLAUSE_APP.match(line) if part != "договор" else RE_CLAUSE.match(line)):
             flush()
-            number = m.group(1)
+            number = f"П.{m.group(1)}" if part != "договор" else m.group(1)
             current = Clause(
                 number=number,
                 text="",
                 section_no=section_no,
                 section_title=section_title,
-                level=number.count(".") + 1,
-                parent=number.rsplit(".", 1)[0] if "." in number else "",
+                level=number.count(".") + 1 if part == "договор" else 1,
+                parent=number.rsplit(".", 1)[0] if "." in number and part == "договор" else "",
+                part=part,
+                # реквизиты встречаются в двух видах: отдельным разделом
+                # (TR-114 «## 10. АДРЕСА И РЕКВИЗИТЫ СТОРОН») и пунктом внутри
+                # заключительных положений (AR-203 «7.3. Реквизиты Сторон:»)
+                indexed=not (RE_NOT_INDEXED.search(section_title or "")
+                             or RE_NOT_INDEXED.search(line)),
             )
             buf = [line.strip()]
             continue
@@ -203,6 +307,141 @@ def display(doc_id: str, c: Clause) -> str:
     if c.is_sequential:
         return f"{doc_id}, Статья {c.section_no}, п. {c.number}"
     return f"{doc_id}, п. {c.number}"
+
+
+# Допсоглашение делает с договором три РАЗНЫЕ вещи, и путать их нельзя:
+# изложить в новой редакции (старый пункт больше не действует), исключить
+# (пункта больше нет), дополнить новым пунктом (старого не было вовсе —
+# ничего не отменяется). Для поиска все три меняют «что действует сейчас»,
+# но для извлечения реквизитов (RAG/07-extraction.md) разница существенна:
+# «исключён» и «изменён» дают разные значения в истории поля.
+RE_AMENDS = re.compile(r"Пункт\s+(\d+(?:\.\d+)*)\s+Договора\s+изложить")
+RE_EXCLUDES = re.compile(r"Пункт\s+(\d+(?:\.\d+)*)\s+Договора\s+исключить")
+RE_ADDS = re.compile(r"Дополнить\s+Договор\s+пунктом\s+(\d+(?:\.\d+)*)")
+
+
+def amendment(c: Clause) -> tuple[str, str]:
+    """Что этот пункт допсоглашения делает с основным договором.
+
+    Возвращает (операция, номер пункта): "изменяет" | "исключает" | "добавляет",
+    либо ("", "") — если пункт ничего не меняет.
+
+    Допсоглашение НЕ применяется к договору и не переписывает его: пункты ДС
+    остаются отдельными чанками со своими адресами, а исходный пункт получает
+    пометку. Так задано золотым набором — в нём `relevant` и `superseded`
+    разные поля, и в вопросе «какая СЕЙЧАС предельная сумма» верен только
+    пункт ДС, а исходный числится отдельно. Применённая правка стёрла бы
+    возможность показать первоначальную редакцию, а для юриста это и есть
+    предмет спора.
+    """
+    for op, rx in (("изменяет", RE_AMENDS), ("исключает", RE_EXCLUDES), ("добавляет", RE_ADDS)):
+        if m := rx.search(c.text):
+            return op, m.group(1)
+    return "", ""
+
+
+@dataclass
+class Chunk:
+    """Единица индекса: один пункт или родитель со своими подпунктами."""
+
+    id: str  # <doc_id>#<номер ведущего пункта> — совпадает с golden-set
+    clause_ids: list[str]  # все пункты, вошедшие в чанк
+    text: str  # чистый текст, идёт в контекст модели и в цитаты
+    embed_text: str  # с шапкой-адресом, идёт в вектор
+    payload: dict
+
+
+def chunk_document(
+    doc_id: str,
+    doc_title: str,
+    clauses: list[Clause],
+    doc_type: str = "",
+    count_tokens=estimate_tokens,
+) -> list[Chunk]:
+    """Пункты -> чанки. Родитель склеивается со своими подпунктами.
+
+    Правило склейки выбрано по замеру корпуса 08.08.2026, а не по умолчанию:
+    медиана пункта — 39 токенов, 53 % короче 40. При этом самые короткие
+    пункты почти все оказались РОДИТЕЛЯМИ перечислений — «3.1. Перевозчик
+    обязан:» на 7 токенов, а следом 3.1.1…3.1.5. Склейка «с соседями до N
+    токенов», как написано в RAG/02-chunking.md, разрезала бы такое
+    перечисление посередине; склейка «родитель + его дети» сохраняет и смысл,
+    и адрес.
+
+    Идентификатор чанка — адрес ведущего пункта, поэтому совпадение
+    с золотым набором считается по `clause_ids`, а не по `id`: вопрос может
+    указывать на подпункт, попавший внутрь чанка родителя.
+    """
+    by_number = {c.number: c for c in clauses}
+    consumed: set[str] = set()
+    chunks: list[Chunk] = []
+
+    def descendants(c: Clause) -> list[Clause]:
+        out = []
+        for n in c.children:
+            child = by_number[n]
+            out.append(child)
+            out.extend(descendants(child))
+        return out
+
+    for c in clauses:
+        if not c.indexed or c.number in consumed:
+            continue
+
+        group = [c] + [d for d in descendants(c) if d.indexed]
+        consumed.update(g.number for g in group)
+
+        # Слишком длинная группа режется вторично: родитель повторяется
+        # в каждой части как контекст, иначе «4.1.4» без «Перевозчик обязан:»
+        # теряет смысл. На корпусе первой партии не срабатывает ни разу —
+        # самый длинный чанк 400 токенов при пределе 512, — то есть эта
+        # ветка ПОКА НЕ ПРОВЕРЕНА на реальных данных.
+        parts, cur = [], [group[0]]
+        for g in group[1:]:
+            probe = cur + [g]
+            if len(cur) > 1 and count_tokens("\n".join(x.text for x in probe)) > MAX_TOKENS:
+                parts.append(cur)
+                cur = [group[0], g]
+            else:
+                cur = probe
+        parts.append(cur)
+
+        for part in parts:
+            lead = part[0] if len(part) == 1 else part[min(1, len(part) - 1)]
+            ids = [g.number for g in part]
+            text = "\n".join(g.text for g in part)
+            addr = display(doc_id, lead)
+            chunks.append(
+                Chunk(
+                    id=f"{doc_id}#{lead.number}",
+                    clause_ids=ids,
+                    text=text,
+                    embed_text=contextualize(doc_title, lead, addr),
+                    payload={
+                        "doc_id": doc_id,
+                        "doc_type": doc_type,
+                        "part": lead.part,
+                        "section_no": lead.section_no,
+                        "section_title": lead.section_title,
+                        "clause_no": lead.number,
+                        "clause_ids": ids,
+                        "parent_id": f"{doc_id}#{lead.parent}" if lead.parent else "",
+                        "has_table": any(g.has_table for g in part),
+                        # [{"операция": "изменяет", "пункт": "4.2"}, ...]
+                        "amends": [
+                            {"операция": op, "пункт": num}
+                            for g in part
+                            if (op := amendment(g)[0]) and (num := amendment(g)[1])
+                        ],
+                        "text": text,
+                    },
+                )
+            )
+
+    # шапка чанка строится по ведущему пункту, а текст — по всей группе
+    for ch in chunks:
+        ch.embed_text = ch.embed_text.rsplit("\n\n", 1)[0] + "\n\n" + ch.text
+    return chunks
 
 
 def contextualize(doc_title: str, c: Clause, addr: str) -> str:
