@@ -14,6 +14,7 @@
 Запуск:
     uv run python scripts/evaluate.py                 # только векторный поиск
     uv run python scripts/evaluate.py --rerank        # каскад top-50 -> реранкер
+    uv run python scripts/evaluate.py --rerank --depth 10   # реранкуется только голова
     uv run python scripts/evaluate.py --rerank --head # реранкеру даётся шапка чанка
     uv run python scripts/evaluate.py --json          # строка для журнала
 """
@@ -57,6 +58,21 @@ def expected(question: dict, by_clause: dict[str, str]) -> set[str]:
     return out
 
 
+def depth_arg() -> int:
+    """Глубина каскада: сколько кандидатов уходит реранкеру.
+
+    Дефолт — вся выдача первого каскада. Инструмент измерения должен
+    по умолчанию показывать полную картину; продуктовое значение выбирается
+    замером и на партии 1 не выбирается вовсе (RAG/lab-06-rerank.md).
+    """
+    if "--depth" not in sys.argv:
+        return LIMIT
+    d = int(sys.argv[sys.argv.index("--depth") + 1])
+    if not 1 <= d <= LIMIT:
+        sys.exit(f"--depth должен быть от 1 до {LIMIT} (глубина первого каскада)")
+    return d
+
+
 def doc_text(payload: dict, with_head: bool) -> str:
     """Что показать реранкеру: голый текст пункта или текст с шапкой.
 
@@ -93,6 +109,7 @@ def main() -> None:
     # --- второй каскад: пересортировка кандидатов кросс-энкодером
     rerank_on = "--rerank" in sys.argv
     with_head = "--head" in sys.argv
+    depth = depth_arg()
     rr_elapsed = 0.0
     if rerank_on:
         from rag_lab.rerank import Reranker
@@ -103,13 +120,19 @@ def main() -> None:
         t0 = time.perf_counter()
         reordered = []
         for q, res in zip(questions, results):
-            docs = [doc_text(pl, with_head) for _, _, pl in res]
+            # Реранкуется ГОЛОВА списка; хвост остаётся в порядке векторного
+            # поиска и никуда не девается. Выбрасывать нереранкованный хвост
+            # значило бы терять recall на ровном месте: кандидаты найдены,
+            # просто до них не дошла очередь второй модели.
+            head, tail = res[:depth], res[depth:]
+            docs = [doc_text(pl, with_head) for _, _, pl in head]
             order = rr.rank(q["q"], docs)
-            reordered.append([res[i] for i, _ in order])
+            reordered.append([head[i] for i, _ in order] + tail)
         rr_elapsed = time.perf_counter() - t0
         results = reordered
-        print(f"каскад: top-{LIMIT} -> реранкер"
-              + (" (с шапкой чанка)" if with_head else " (голый текст пункта)") + "\n")
+        print(f"каскад: top-{LIMIT} -> реранкер top-{depth}"
+              + (" (с шапкой чанка)" if with_head else " (голый текст пункта)")
+              + f"\nхвост {LIMIT - depth} кандидатов остаётся в порядке векторного поиска\n")
 
     rows, rnd_rows = [], []
     print(f"{'вопрос':52s} {'верных':>7} {'поз.':>5} {'r@5':>6} {'nDCG@5':>7}")
@@ -152,7 +175,7 @@ def main() -> None:
           f"({elapsed / n_q * 1000:.0f} мс на запрос, кэш вопросов тёплый)")
     if rerank_on:
         print(f"реранкер сверх того: {rr_elapsed:.2f} с "
-              f"({rr_elapsed / n_q * 1000:.0f} мс на запрос на {LIMIT} кандидатов)")
+              f"({rr_elapsed / n_q * 1000:.0f} мс на запрос на {depth} кандидатов)")
 
     # --- вопросы, на которых поиск промахнулся мимо пятёрки
     bad = [(q, r) for q, r in zip(questions, rows) if r["hit@5"] == 0]
@@ -167,6 +190,8 @@ def main() -> None:
             "чанков": n_points,
             "вопросов": len(questions),
             "реранкер": ("с шапкой" if with_head else "голый текст") if rerank_on else "нет",
+            # без глубины строки журнала неразличимы между собой
+            "глубина": depth if rerank_on else None,
             **{k: round(v, 3) for k, v in got.items()},
         }
         print("\n" + json.dumps(line, ensure_ascii=False))
