@@ -115,6 +115,9 @@ RE_SECTION = re.compile(r"^#{1,6}\s+(?:(Статья|Раздел)\s+)?(\d+)\.?\
 RE_APPENDIX = re.compile(r"^#{1,6}\s+Приложение\s*№?\s*(\d+)")
 # Заголовок документа: единственная "# ..." в начале файла
 RE_TITLE = re.compile(r"^#\s+(?!\d)(.+)$")
+# Любой заголовок — нужен, чтобы поймать ненумерованные подзаголовки,
+# которые не являются ни разделом, ни приложением
+RE_HEADING = re.compile(r"^#{1,6}\s+(.+)$")
 # Номер пункта в начале абзаца: "4.2." / "3.4.3.1." / "17." — точка в конце
 # необязательна, но точки внутри обязаны разделять только цифры.
 RE_CLAUSE = re.compile(r"^(\d+(?:\.\d+)*)\.?\s+(?=[«А-ЯЁA-Z])")
@@ -272,6 +275,24 @@ def parse_markdown(path: str | Path) -> tuple[str, list[Clause]]:
         if m := RE_SECTION.match(line):
             flush()
             section_no, section_title = m.group(2), m.group(3).strip()
+            continue
+
+        # Ненумерованный подзаголовок. Раньше выбрасывался молча, и это
+        # стоило одного вопроса золотого набора: у допсоглашения строка
+        # «## к Договору перевозки груза № ТР-114/2026» — единственное место,
+        # где сказано, к какому договору оно относится. Без неё чанки ДС
+        # уходили в вектор с шапкой «ДОПОЛНИТЕЛЬНОЕ СОГЛАШЕНИЕ № 1»,
+        # где нет ни перевозки, ни номера, и вопрос «предельная сумма
+        # по перевозке для Ромашки» находил их на 45-й позиции
+        # (RAG/lab-05-search.md).
+        if (m := RE_HEADING.match(line)) and not RE_TITLE.match(line):
+            head = m.group(1).strip()
+            if not clauses and current is None:
+                # до первого пункта — это часть названия документа
+                doc_title = f"{doc_title} {head}".strip()
+            elif part != "договор" and not section_title:
+                # заголовок приложения: «СПЕЦИФИКАЦИЯ УСЛУГ И ТАРИФОВ»
+                section_title = head
             continue
 
         if m := (RE_CLAUSE_APP.match(line) if part != "договор" else RE_CLAUSE.match(line)):
@@ -506,7 +527,8 @@ def contextualize(doc_title: str, c: Clause, addr: str, text: str) -> str:
     elif c.part != "договор":
         # приложение: своего раздела у него нет, но без адреса вектор не знает,
         # что таблица тарифов относится именно к этому договору
-        head += f"\n{c.part.capitalize()} → {addr}"
+        name = c.part.capitalize() + (f". {c.section_title}" if c.section_title else "")
+        head += f"\n{name} → {addr}"
     else:
         head += f"\n{addr}"
     return f"{head}\n\n{text}"
