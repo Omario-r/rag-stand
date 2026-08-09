@@ -12,8 +12,10 @@
 на партии 2.
 
 Запуск:
-    uv run python scripts/evaluate.py            # базовый прогон
-    uv run python scripts/evaluate.py --json     # строка для журнала
+    uv run python scripts/evaluate.py                 # только векторный поиск
+    uv run python scripts/evaluate.py --rerank        # каскад top-50 -> реранкер
+    uv run python scripts/evaluate.py --rerank --head # реранкеру даётся шапка чанка
+    uv run python scripts/evaluate.py --json          # строка для журнала
 """
 
 import json
@@ -55,6 +57,22 @@ def expected(question: dict, by_clause: dict[str, str]) -> set[str]:
     return out
 
 
+def doc_text(payload: dict, with_head: bool) -> str:
+    """Что показать реранкеру: голый текст пункта или текст с шапкой.
+
+    В вектор уходит текст с шапкой-адресом (лаб 3), и соблазн дать
+    реранкеру то же самое велик. Но кросс-энкодер читает пару целиком,
+    и шапка занимает его контекст служебными словами. Что лучше —
+    вопрос замера, а не вкуса; отсюда флаг.
+    """
+    if not with_head:
+        return payload["text"]
+    head = payload.get("doc_type", "")
+    if payload.get("section_title"):
+        head += f", раздел «{payload['section_title']}»"
+    return f"{head}\n{payload['text']}" if head else payload["text"]
+
+
 def main() -> None:
     chunks = build_chunks()
     by_clause = chunk_by_clause(chunks)
@@ -71,6 +89,27 @@ def main() -> None:
     t0 = time.perf_counter()
     results = S.search_batch(cl, emb, [q["q"] for q in questions], limit=LIMIT)
     elapsed = time.perf_counter() - t0
+
+    # --- второй каскад: пересортировка кандидатов кросс-энкодером
+    rerank_on = "--rerank" in sys.argv
+    with_head = "--head" in sys.argv
+    rr_elapsed = 0.0
+    if rerank_on:
+        from rag_lab.rerank import Reranker
+
+        rr = Reranker()
+        if not rr.healthy():
+            sys.exit("реранкер отвечает, но скоры битые — проверьте конвертацию модели")
+        t0 = time.perf_counter()
+        reordered = []
+        for q, res in zip(questions, results):
+            docs = [doc_text(pl, with_head) for _, _, pl in res]
+            order = rr.rank(q["q"], docs)
+            reordered.append([res[i] for i, _ in order])
+        rr_elapsed = time.perf_counter() - t0
+        results = reordered
+        print(f"каскад: top-{LIMIT} -> реранкер"
+              + (" (с шапкой чанка)" if with_head else " (голый текст пункта)") + "\n")
 
     rows, rnd_rows = [], []
     print(f"{'вопрос':52s} {'верных':>7} {'поз.':>5} {'r@5':>6} {'nDCG@5':>7}")
@@ -108,8 +147,12 @@ def main() -> None:
     for k in ("recall@1", "recall@5", "recall@50", "hit@1", "hit@5", "hit@50", "MRR", "nDCG@5"):
         print(f"{k:12s} {got[k]:9.3f} {rnd[k]:10.3f}   {meaning[k]}")
 
-    print(f"\nвремя на {len(questions)} запросов: {elapsed:.2f} с "
-          f"({elapsed / len(questions) * 1000:.0f} мс на запрос, кэш вопросов тёплый)")
+    n_q = len(questions)
+    print(f"\nвремя на {n_q} запросов: {elapsed:.2f} с "
+          f"({elapsed / n_q * 1000:.0f} мс на запрос, кэш вопросов тёплый)")
+    if rerank_on:
+        print(f"реранкер сверх того: {rr_elapsed:.2f} с "
+              f"({rr_elapsed / n_q * 1000:.0f} мс на запрос на {LIMIT} кандидатов)")
 
     # --- вопросы, на которых поиск промахнулся мимо пятёрки
     bad = [(q, r) for q, r in zip(questions, rows) if r["hit@5"] == 0]
@@ -123,6 +166,7 @@ def main() -> None:
             "коллекция": store.COLLECTION,
             "чанков": n_points,
             "вопросов": len(questions),
+            "реранкер": ("с шапкой" if with_head else "голый текст") if rerank_on else "нет",
             **{k: round(v, 3) for k, v in got.items()},
         }
         print("\n" + json.dumps(line, ensure_ascii=False))
