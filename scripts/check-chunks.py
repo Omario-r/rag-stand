@@ -33,11 +33,14 @@ for name, (doc_id, doc_type) in DOCS.items():
     sizes = sorted(estimate_tokens(c.text) for c in got)
     merged = sum(1 for c in got if len(c.clause_ids) > 1)
     print(f"{doc_id:11s} {len(clauses):3d} пунктов -> {len(got):3d} чанков "
-          f"(склеено {merged})  токены: мед {sizes[len(sizes)//2]:3d}  max {sizes[-1]:3d}")
+          f"(склеено {merged})  оценка: мед {sizes[len(sizes)//2]:3d}  max {sizes[-1]:3d}")
 
 sizes = sorted(estimate_tokens(c.text) for c in chunks)
 n = len(sizes)
-print(f"\nвсего чанков: {n}   токены: мин {sizes[0]}  мед {sizes[n//2]}  "
+# ЭТО ОЦЕНКА, А НЕ ЗАМЕР: len/CHARS_PER_TOKEN_WORST, завышает примерно
+# в 1,4 раза у Qwen3 и вдвое у e5. Настоящие числа — scripts/measure-tokens.py,
+# он ходит в /tokenize работающего сервера и потому требует поднятого стенда.
+print(f"\nвсего чанков: {n}   ОЦЕНКА токенов: мин {sizes[0]}  мед {sizes[n//2]}  "
       f"p90 {sizes[int(n*0.9)]}  max {sizes[-1]}")
 print(f"короче 40 токенов: {sum(1 for s in sizes if s < 40)}   "
       f"длиннее {MAX_TOKENS}: {sum(1 for s in sizes if s > MAX_TOKENS)}")
@@ -67,7 +70,7 @@ for cid, a in links:
 
 print("\n=== самые короткие чанки: осмысленны ли поодиночке ===")
 for ch in sorted(chunks, key=lambda c: estimate_tokens(c.text))[:6]:
-    print(f"  {estimate_tokens(ch.text):3d} ток.  {ch.id:16s} {ch.text[:70]}")
+    print(f"  ~{estimate_tokens(ch.text):3d} ток.  {ch.id:16s} {ch.text[:70]}")
 
 # --- глазами
 k = int(sys.argv[1]) if len(sys.argv) > 1 else 3
@@ -75,5 +78,5 @@ print(f"\n=== {k} чанков целиком (то, что уйдёт в век
 step = max(1, len(chunks) // k)
 for ch in chunks[::step][:k]:
     print(f"\n--- {ch.id}  пункты={ch.clause_ids}  "
-          f"{estimate_tokens(ch.text)} ток. ---")
+          f"~{estimate_tokens(ch.text)} ток. (оценка) ---")
     print(ch.embed_text[:600])
