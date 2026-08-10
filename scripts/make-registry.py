@@ -161,10 +161,18 @@ def ogrn_valid(ogrn: str) -> bool:
     return False
 
 
-def _ogrn(rnd: random.Random, ip: bool = False) -> str:
-    n = 14 if ip else 12
-    first = "3" if ip else "1"
-    body = first + "".join(str(rnd.randint(0, 9)) for _ in range(n - 1))
+def _ogrn(rnd: random.Random, region: str, ip: bool = False) -> str:
+    """ОГРН со значащими знаками, а не просто с верной контрольной суммой.
+
+    Знак 1 — признак (1 у юрлица, 3 у ИП), знаки 2–3 — год регистрации,
+    4–5 — код региона. Первая редакция набивала всё случайными цифрами
+    и выдавала ОГРН с годом регистрации «97» при контрольной сумме,
+    которая сходится: формально валидно, на вид — подделка.
+    """
+    year = f"{rnd.randint(2, 24):02d}"
+    tail = 9 if ip else 7
+    body = ("3" if ip else "1") + year + region
+    body += "".join(str(rnd.randint(0, 9)) for _ in range(tail))
     return body + str(int(body) % (13 if ip else 11) % 10)
 
 
@@ -268,16 +276,30 @@ def make_orgs(rnd: random.Random, n_new: int, n_ip: int) -> list[dict]:
             "примечание": "из партии 1, не менять: на этом корпусе сделаны замеры 08–10.08.2026",
         })
 
-    used_cores: set[str] = set()
+    # Имена партии 1 заняты: иначе генератор выдаёт второе ООО «Ромашка»
+    # с другим ИНН. Два юрлица с одним названием — вещь в жизни возможная
+    # и для проверки «контрагент опознаётся по ИНН» даже полезная, но такое
+    # заводится намеренно и с пометкой, а не случайно из общего словаря.
+    used_cores = {o["название_кратко"].split("«")[1].rstrip("»")
+                  for o in orgs if "«" in o["название_кратко"]}
     for i in range(n_new):
         city, region = rnd.choice(_CITY)
         ip = i in ip_idx
+
+        # Подписант рисуется до организации: у ИП он и есть организация,
+        # и разойтись они не должны. Первая редакция рисовала имя дважды —
+        # получался «ИП Фёдоров Андрей Викторович» за подписью Беловой.
+        sur = rnd.choice(_SURNAME)
+        female = rnd.random() < 0.25
+        first, patr = rnd.choice(_NAME_F if female else _NAME)
+        if female:
+            sur += "а"
+        person = f"{sur} {first} {patr}"
+
         if ip:
-            sur = rnd.choice(_SURNAME)
-            first, patr = rnd.choice(_NAME)
-            short = f"ИП {sur} {first} {patr}"
+            short = f"ИП {person}"
             inn = _inn12(rnd, region + "0")
-            org = {"огрнип": _ogrn(rnd, ip=True)}
+            org = {"огрнип": _ogrn(rnd, region, ip=True)}
         else:
             while True:
                 core = (rnd.choice(_PLAIN) if rnd.random() < 0.4
@@ -287,13 +309,7 @@ def make_orgs(rnd: random.Random, n_new: int, n_ip: int) -> list[dict]:
                     break
             short = f"ООО «{core}»"
             inn = _inn10(rnd, region + "0")
-            org = {"кпп": _kpp(inn), "огрн": _ogrn(rnd)}
-
-        sur = rnd.choice(_SURNAME)
-        female = rnd.random() < 0.25
-        first, patr = rnd.choice(_NAME_F if female else _NAME)
-        if female:
-            sur += "а"
+            org = {"кпп": _kpp(inn), "огрн": _ogrn(rnd, region)}
 
         variants = _name_variants(short)
         org.update({
@@ -304,7 +320,7 @@ def make_orgs(rnd: random.Random, n_new: int, n_ip: int) -> list[dict]:
             "город": city,
             "адрес": f"{city}, ул. {rnd.choice(_STREET)}, д. {rnd.randint(1, 90)}",
             "руководитель": {
-                "фио": f"{sur} {first} {patr}",
+                "фио": person,
                 "должность": "индивидуальный предприниматель" if ip else rnd.choice(_POST),
                 "действует_на_основании": "свидетельства" if ip else "Устава",
             },
@@ -350,6 +366,7 @@ def make_cases(rnd: random.Random, orgs: list[dict], n_new: int) -> list[dict]:
 
         signed = date(2025, 1, 1) + timedelta(days=rnd.randint(0, 640))
         months = rnd.choice([12, 12, 18, 24, 36])
+        end = signed + timedelta(days=months * 30)
         amount = rnd.choice([1_200_000, 2_500_000, 3_800_000, 4_500_000,
                              6_200_000, 8_000_000, 12_400_000, 15_000_000])
         has_ds = rnd.random() < 0.30
@@ -359,28 +376,53 @@ def make_cases(rnd: random.Random, orgs: list[dict], n_new: int) -> list[dict]:
             "номер": f"{code}-{seq[code]}/{signed.year}",
             "дата": signed.isoformat(),
             "срок_месяцев": months,
-            "дата_окончания": (signed + timedelta(days=months * 30)).isoformat(),
+            "дата_окончания": end.isoformat(),
             "стороны": [
                 {"роль": role_a, "инн": a["инн"], "название": a["название_кратко"]},
                 {"роль": role_b, "инн": b["инн"], "название": b["название_кратко"]},
             ],
             "предельная_сумма": money(amount),
-            "ставка_простоя": money(rnd.choice([800, 1_200, 1_500, 1_800, 2_400])),
-            "бесплатное_время_часов": rnd.choice([2, 4, 6, 8, 12]),
             "срок_оплаты_дней": rnd.choice([5, 7, 10, 14, 20, 30]),
             "неустойка_процент": rnd.choice([0.05, 0.1, 0.15, 0.2]),
             "приложение": rnd.random() < 0.40,
             "допсоглашение": has_ds,
             "партия": 2,
         }
+
+        # Ставки зависят от типа договора. Простоя транспорта в аренде ТС
+        # не бывает, а поле, которого в договоре нет вовсе, — самая опасная
+        # категория для извлечения: модель кладёт в него значение
+        # из ближайшего похожего пункта, и оба барьера молчат, потому что
+        # цитата подлинная (запись 10.08.2026 в журнале решений). Пусть корпус
+        # проверяет и это — то есть умеет ли модель честно промолчать.
+        if kind in ("перевозка", "экспедирование"):
+            case["ставка_простоя"] = money(rnd.choice([800, 1_200, 1_500, 1_800, 2_400]))
+            case["бесплатное_время_часов"] = rnd.choice([2, 4, 6, 8, 12])
+        elif kind == "аренда_ТС":
+            case["арендная_плата_в_месяц"] = money(
+                rnd.choice([90_000, 120_000, 150_000, 210_000]))
+            case["обеспечительный_платёж"] = money(
+                rnd.choice([100_000, 150_000, 300_000]))
+        else:                                       # хранение
+            case["плата_за_паллетоместо_в_сутки"] = money(rnd.choice([45, 60, 80, 110]))
+            case["сверхнормативное_хранение_в_сутки"] = money(rnd.choice([120, 180, 250]))
+
         if has_ds:
-            ds_date = signed + timedelta(days=rnd.randint(60, 400))
+            # Допсоглашение к истёкшему договору — бессмыслица: не раньше двух
+            # месяцев после подписания и не позже, чем за месяц до окончания.
+            ds_date = signed + timedelta(days=rnd.randint(60, months * 30 - 30))
+            changeable = [k for k in ("предельная_сумма", "срок_оплаты_дней",
+                                      "дата_окончания", "ставка_простоя",
+                                      "арендная_плата_в_месяц",
+                                      "плата_за_паллетоместо_в_сутки")
+                          if k in case or k == "дата_окончания"]
             case["допсоглашение_детали"] = {
                 "дата": ds_date.isoformat(),
-                "меняет": rnd.sample(
-                    ["предельная_сумма", "срок_оплаты_дней", "ставка_простоя",
-                     "дата_окончания"], k=rnd.randint(2, 4)),
+                "меняет": sorted(rnd.sample(changeable,
+                                            k=min(len(changeable), rnd.randint(2, 4)))),
                 "новая_сумма": money(int(amount * rnd.choice([1.2, 1.4, 1.5]))),
+                "новая_дата_окончания": (end + timedelta(
+                    days=rnd.choice([180, 365]))).isoformat(),
             }
         cases.append(case)
     return cases
@@ -437,16 +479,26 @@ def check(data: dict) -> list[str]:
         for side in c.get("стороны", []):
             if side["инн"] not in known:
                 bad.append(f"{c['дело']}: сторона {side['инн']} не в реестре")
-        for key in ("предельная_сумма", "ставка_простоя"):
-            m = c.get(key)
-            if m and m["прописью"] != rubles_in_words(m["число"]):
-                bad.append(f"{c['дело']}: пропись «{key}» разошлась с числом")
+        # Пропись сверяется у всех денежных полей, а не у перечисленных
+        # поимённо: набор полей зависит от типа договора и будет пополняться.
+        for key, m in c.items():
+            if isinstance(m, dict) and "прописью" in m:
+                if m["прописью"] != rubles_in_words(m["число"]):
+                    bad.append(f"{c['дело']}: пропись «{key}» разошлась с числом")
         ds = c.get("допсоглашение_детали")
         if ds:
             if ds["дата"] <= c["дата"]:
-                bad.append(f"{c['дело']}: допсоглашение не позже договора")
-            if ds["новая_сумма"]["прописью"] != rubles_in_words(ds["новая_сумма"]["число"]):
-                bad.append(f"{c['дело']}: пропись новой суммы разошлась с числом")
+                bad.append(f"{c['дело']}: допсоглашение раньше договора")
+            if ds["дата"] >= c["дата_окончания"]:
+                bad.append(f"{c['дело']}: допсоглашение к уже истёкшему договору")
+            for key in ("новая_сумма",):
+                if ds[key]["прописью"] != rubles_in_words(ds[key]["число"]):
+                    bad.append(f"{c['дело']}: пропись «{key}» разошлась с числом")
+            missing = [f for f in ds["меняет"]
+                       if f not in c and f != "дата_окончания"]
+            if missing:
+                bad.append(f"{c['дело']}: допсоглашение меняет поля, "
+                           f"которых в договоре нет: {missing}")
 
     lonely = [inn for inn in known
               if sum(1 for c in data["дела"]

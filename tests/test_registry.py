@@ -94,10 +94,64 @@ def test_inn_lengths():
 def test_ogrn_checksum():
     rnd = random.Random(3)
     for _ in range(100):
-        assert mr.ogrn_valid(mr._ogrn(rnd))
-        assert mr.ogrn_valid(mr._ogrn(rnd, ip=True))
+        assert mr.ogrn_valid(mr._ogrn(rnd, "77"))
+        assert mr.ogrn_valid(mr._ogrn(rnd, "66", ip=True))
     assert not mr.ogrn_valid("1157746123456")   # выдуман для партии 1
     assert not mr.ogrn_valid("123")
+
+
+def test_ogrn_digits_mean_something():
+    """Год регистрации и регион — не случайные цифры.
+
+    Контрольная сумма сходилась и у ОГРН с годом регистрации «97»: формально
+    валидно, на вид подделка. Для корпуса, который изображает документы,
+    это дефект.
+    """
+    rnd = random.Random(4)
+    for _ in range(50):
+        ogrn = mr._ogrn(rnd, "52")
+        assert ogrn[0] == "1" and len(ogrn) == 13
+        assert 2 <= int(ogrn[1:3]) <= 24        # год регистрации
+        assert ogrn[3:5] == "52"                # код региона
+        ip = mr._ogrn(rnd, "66", ip=True)
+        assert ip[0] == "3" and len(ip) == 15
+        assert 2 <= int(ip[1:3]) <= 24 and ip[3:5] == "66"
+
+
+def test_rates_match_contract_type():
+    """Простоя транспорта в аренде не бывает — и это проверяет честный null.
+
+    Поле, которого в договоре нет вовсе, — самая опасная категория:
+    модель кладёт в него значение из ближайшего похожего пункта, а оба
+    барьера молчат, потому что цитата подлинная.
+    """
+    data = mr.build(mr.SEED, 16, 26)
+    for c in data["дела"]:
+        if c["партия"] == 1:
+            continue
+        if c["тип"] in ("перевозка", "экспедирование"):
+            assert "ставка_простоя" in c and "арендная_плата_в_месяц" not in c
+        elif c["тип"] == "аренда_ТС":
+            assert "арендная_плата_в_месяц" in c and "ставка_простоя" not in c
+        else:
+            assert "плата_за_паллетоместо_в_сутки" in c and "ставка_простоя" not in c
+
+
+def test_ip_signs_for_himself():
+    """У ИП подписант и есть организация: «ИП Фёдоров» за подписью Беловой — дефект."""
+    data = mr.build(mr.SEED, 16, 8)
+    for o in data["организации"]:
+        if o["партия"] == 2 and o["название_кратко"].startswith("ИП"):
+            assert o["название_кратко"] == f"ИП {o['руководитель']['фио']}"
+
+
+def test_amendment_within_contract_term():
+    """Допсоглашение к истёкшему договору — бессмыслица, а выглядит нормально."""
+    data = mr.build(mr.SEED, 16, 26)
+    for c in data["дела"]:
+        ds = c.get("допсоглашение_детали")
+        if ds:
+            assert c["дата"] < ds["дата"] < c["дата_окончания"]
 
 
 # --- Реестр целиком --------------------------------------------------------
