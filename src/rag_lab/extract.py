@@ -32,39 +32,60 @@ from dataclasses import dataclass
 # Узкое ядро + расширение по типу договора. Соблазн описать сорок полей
 # «на все случаи» приводит к тому, что модель заполняет их наугад.
 
+# ТИП ПОЛЯ ЖИВЁТ РЯДОМ С ОПИСАНИЕМ, а не в отдельном словаре. Заведено
+# 10.08.2026, когда денежный разборщик, применённый к процентному полю,
+# молча вернул 0.0: `parse_amount_ru("0.1")` не знает про десятичную точку,
+# берёт первую цифру и выдаёт ноль. Не отказ, а правдоподобное «неустойки
+# нет» — самая опасная категория ошибки по 07-extraction.md.
+#
+# Второй словарь «поле -> тип» был бы тем же дефектом, от которого в этот
+# же день пришлось чинить схему трижды: два места, где записано одно и то же,
+# расходятся молча. Поэтому одна структура.
+
+MONEY, PERCENT, INT, DATE, BOOL, TEXT, ENUM = (
+    "money", "percent", "int", "date", "bool", "text", "enum")
+
+
+@dataclass(frozen=True)
+class Field:
+    kind: str
+    descr: str
+
+
 CORE_FIELDS = {
-    "doc_number": "Номер договора как он написан в шапке",
-    "doc_date": "Дата подписания",
-    "doc_type": "перевозка | экспедирование | аренда_ТС | хранение | иное",
-    "subject": "Предмет договора одной фразой",
-    "amount": "Предельная или общая сумма договора; null, если цена по тарифам",
-    "price_type": "фиксированная | по_тарифам | по_заявкам",
-    "date_start": "Дата начала действия",
+    "doc_number": Field(TEXT, "Номер договора как он написан в шапке"),
+    "doc_date": Field(DATE, "Дата подписания"),
+    "doc_type": Field(ENUM, "перевозка | экспедирование | аренда_ТС | хранение | иное"),
+    "subject": Field(TEXT, "Предмет договора одной фразой"),
+    "amount": Field(MONEY, "Предельная или общая сумма договора; null, если цена по тарифам"),
+    "price_type": Field(ENUM, "фиксированная | по_тарифам | по_заявкам"),
+    "date_start": Field(DATE, "Дата начала действия"),
     # Эти два поля НЕ взаимоисключающие, и сказано это здесь потому, что
     # первая редакция («term_text — когда date_end пуст») дала ровно тот же
     # дефект, что и nullable-объект: два способа выразить одно, модель
     # выбирает один. Замер 10.08.2026: date_end пришло null при том, что
     # в п. 8.1 стоит «действует до 31 декабря 2026 года», — эта же фраза
     # ушла в term_text.
-    "date_end": "Дата окончания действия. Есть дата в тексте — заполнять обязательно; "
-                "null только если срок задан без даты",
-    "term_text": "Формулировка срока дословно. Заполняется всегда, в том числе когда date_end заполнен",
-    "auto_prolongation": "Есть ли автопролонгация (true/false)",
-    "jurisdiction": "Суд, рассматривающий споры",
-    "governing_law": "Применимое право",
+    "date_end": Field(DATE, "Дата окончания действия. Есть дата в тексте — заполнять обязательно; "
+                            "null только если срок задан без даты"),
+    "term_text": Field(TEXT, "Формулировка срока дословно. Заполняется всегда, "
+                             "в том числе когда date_end заполнен"),
+    "auto_prolongation": Field(BOOL, "Есть ли автопролонгация (true/false)"),
+    "jurisdiction": Field(TEXT, "Суд, рассматривающий споры"),
+    "governing_law": Field(TEXT, "Применимое право"),
 }
 
 TRANSPORT_FIELDS = {
-    "liability_cap": "Предел ответственности за утрату груза",
-    "penalty_delay": "Неустойка за просрочку доставки",
-    "demurrage_rate": "Плата за простой транспорта, рублей в час",
-    "free_time_hours": "Нормативное время под погрузкой/разгрузкой, часов",
-    "payment_days": "Отсрочка платежа, дней",
-    "insurance_required": "Обязано ли страхование груза (true/false)",
+    "liability_cap": Field(MONEY, "Предел ответственности за утрату груза"),
+    "penalty_delay": Field(PERCENT, "Неустойка за просрочку доставки"),
+    "demurrage_rate": Field(MONEY, "Плата за простой транспорта, рублей в час"),
+    "free_time_hours": Field(INT, "Нормативное время под погрузкой/разгрузкой, часов"),
+    "payment_days": Field(INT, "Отсрочка платежа, дней"),
+    "insurance_required": Field(BOOL, "Обязано ли страхование груза (true/false)"),
 }
 
 
-def json_schema(fields: dict[str, str]) -> dict:
+def json_schema(fields: dict[str, Field]) -> dict:
     """JSON Schema для `response_format` llama.cpp.
 
     Каждое поле — объект со значением, цитатой и номером пункта, а не голое
@@ -109,9 +130,9 @@ def json_schema(fields: dict[str, str]) -> dict:
     }
 
 
-def prompt_for(fields: dict[str, str], text: str) -> str:
+def prompt_for(fields: dict[str, Field], text: str) -> str:
     """Промпт с описанием полей. Схема их не описывает — описываем словами."""
-    lines = "\n".join(f"- {name}: {descr}" for name, descr in fields.items())
+    lines = "\n".join(f"- {name}: {f.descr}" for name, f in fields.items())
     return (
         "Ниже фрагменты договора. Заполни поля строго по тексту.\n\n"
         f"Поля:\n{lines}\n\n"
@@ -250,7 +271,15 @@ _forms(SCALES, 1000, "тысяча", "тысячи", "тысяч", "тысячу
 _forms(SCALES, 10**6, "миллион", "миллиона", "миллионов", "миллиону", "миллионам")
 _forms(SCALES, 10**9, "миллиард", "миллиарда", "миллиардов", "миллиарду")
 
-RE_DIGITS = re.compile(r"\d[\d \u00a0]*\d|\d")
+# Число целиком: обязано кончаться цифрой, иначе в совпадение попадает
+# пробел перед скобкой с прописью. Десятичная часть — через запятую или
+# точку: в договорах пишут «0,1 процента», а прежний шаблон брал из «0,1»
+# первый ноль и молча возвращал 0.0 (замер 10.08.2026). Ноль вместо отказа —
+# самая опасная категория ошибки: «неустойки нет» звучит осмысленно.
+RE_NUMBER = re.compile("\\d(?:[\\d  ]*\\d)?(?:[.,]\\d+)?")
+
+# Пропись сразу за числом, в скобках: «1 500 (одной тысячи пятисот) рублей».
+RE_AFTER = re.compile("\\s*\\(([^)]*)\\)")
 
 
 def words_to_number(s: str) -> int | None:
@@ -268,40 +297,89 @@ def words_to_number(s: str) -> int | None:
     return total + current if seen else None
 
 
+СХОДИТСЯ, РАСХОДИТСЯ, НЕ_СВЕРЕНО = "сходится", "расходится", "не сверено"
+
+
 @dataclass
 class Amount:
     value: float | None
-    digits: int | None
+    digits: float | None
     words: int | None
 
     @property
+    def verdict(self) -> str:
+        """Три исхода, а не два.
+
+        `agrees is False` означал сразу две разные вещи: «пропись расходится
+        с цифрами» и «прописи нет вовсе». Первое обязано попасть к человеку —
+        в договоре опечатка. Второе — обычное дело, у половины чисел прописи
+        не бывает. Слитые в один флаг, они дают либо очередь из половины
+        корпуса, либо не дают ничего.
+        """
+        if self.digits is None or self.words is None:
+            return НЕ_СВЕРЕНО
+        return СХОДИТСЯ if self.digits == self.words else РАСХОДИТСЯ
+
+    @property
     def agrees(self) -> bool:
-        """Совпали ли цифры с прописью. Расхождение — сигнал, а не ошибка."""
-        return self.digits is not None and self.words is not None and self.digits == self.words
+        return self.verdict == СХОДИТСЯ
+
+
+def _to_number(s: str) -> float:
+    return float(s.replace(" ", "").replace(" ", "").replace(",", "."))
+
+
+def numbers_in(text: str) -> list[Amount]:
+    """Все числа текста, каждое со своей прописью, если она стоит следом.
+
+    Нужен именно список: в одном пункте чисел бывает несколько. П. 6.2
+    нашего корпуса — «неустойку в размере 0,1 (одной десятой) процента …
+    но не более 10 (десяти) процентов»: два числа, и какое из них значение
+    поля, из текста не следует. Выбирает `pick_number` по подсказке.
+
+    ПРОПИСЬ СВЕРЯЕТСЯ ТОЛЬКО У ЦЕЛЫХ. «0,1 (одной десятой)» словарь целых
+    разбирает как 1 и объявил бы расхождение там, где его нет. Ложная
+    тревога в такой проверке хуже её отсутствия: на неё перестают смотреть.
+    Ровно поэтому же в словарь числительных заведены все падежи.
+    """
+    out: list[Amount] = []
+    for m in RE_NUMBER.finditer(text or ""):
+        digits = _to_number(m.group())
+        words = None
+        if digits == int(digits):
+            if tail := RE_AFTER.match(text, m.end()):
+                words = words_to_number(tail.group(1))
+        out.append(Amount(digits, digits, words))
+    return out
+
+
+def pick_number(text: str, hint: float | None = None) -> Amount | None:
+    """Выбрать из текста то число, которое имел в виду источник подсказки.
+
+    Подсказка — значение, вернувшееся от модели. Само оно в базу НЕ идёт:
+    идёт число, найденное в проверенной цитате. Роли такие потому, что
+    цитата — единственное, что прошло механическую проверку, а `value`
+    модель нормализует вопреки промпту, теряя пропись (замер 10.08.2026).
+
+    Соответствия подсказке нет — возвращаем None. Правило «бери первое число
+    из цитаты» заменило бы один тихий источник ошибок другим.
+    """
+    found = numbers_in(text)
+    if not found:
+        return None
+    if hint is None:
+        return next((a for a in found if a.words is not None), found[0])
+    return next((a for a in found if a.digits == hint), None)
 
 
 def parse_amount_ru(s: str) -> Amount:
     """«4 500 000 (четыре миллиона пятьсот тысяч) рублей 00 копеек» -> 4500000.
 
-    Цифры и пропись разбираются ПОРОЗНЬ и сверяются. Расхождение между ними
-    само по себе полезный сигнал: в договоре опечатка, и это тот случай,
-    когда автоматике доверять нельзя, а человеку — нужно показать.
+    Первое число текста вместе с его прописью. Когда чисел может быть
+    несколько — а в цитате это норма, — брать `pick_number` с подсказкой.
     """
-    if not s:
-        return Amount(None, None, None)
-    # пропись обычно в скобках; если скобок нет — берём весь текст
-    inside = re.findall(r"\(([^)]*)\)", s)
-    words = words_to_number(" ".join(inside) if inside else s)
-
-    outside = re.sub(r"\([^)]*\)", " ", s)
-    digits = None
-    if m := RE_DIGITS.search(outside):
-        digits = int(re.sub(r"[  ]", "", m.group()))
-
-    value = float(digits) if digits is not None else (float(words) if words else None)
-    return Amount(value, digits, words)
-
-
+    found = numbers_in(s)
+    return found[0] if found else Amount(None, None, None)
 # --- Нормализация: ИНН -----------------------------------------------------
 
 
@@ -325,3 +403,106 @@ def inn_valid(inn: str) -> bool:
             and int(inn[11]) == sum(int(d) * k for d, k in zip(inn, w2)) % 11 % 10
         )
     return False
+
+
+# --- Нормализация по типу поля ---------------------------------------------
+#
+# Один разборщик «для чисел» правильным быть не может: в схеме поля минимум
+# шести типов, и денежный разбор, применённый к процентному полю, 10.08.2026
+# молча вернул 0.0. Поэтому тип берётся из `Field.kind`, а не угадывается.
+#
+# ИСТОЧНИК ЗНАЧЕНИЯ — ПРОВЕРЕННАЯ ЦИТАТА, А НЕ ОТВЕТ МОДЕЛИ. Замер того же
+# дня: модель нормализует сама вопреки промпту — возвращает 4500000 вместо
+# «4 500 000 (четыре миллиона пятьсот тысяч) рублей», и сверка цифр
+# с прописью пропадает. Цитата же проверена на вхождение в документ, и
+# пропись в ней сохранена дословно. Ответ модели остаётся подсказкой:
+# он говорит, КАКОЕ из чисел цитаты имеется в виду, и только.
+
+
+@dataclass
+class Normalized:
+    """Итог нормализации одного поля.
+
+    `ok is False` — значение в `extracted_field` не пишется, строка уходит
+    в `pending` с причиной. Причина обязана быть человекочитаемой: разбирать
+    очередь будет юрист, а не автор кода.
+    """
+
+    value: object | None
+    ok: bool
+    reason: str = ""
+    verdict: str = НЕ_СВЕРЕНО
+
+
+def dates_in(text: str) -> list[str]:
+    """Все даты текста в ISO. Список, потому что в пункте их бывает две:
+    «вступает в силу 12 марта 2026 года и действует до 31 декабря 2026 года»."""
+    out = []
+    for m in RE_DATE_RU.finditer(text or ""):
+        day, month_word, year = m.groups()
+        if month := MONTHS.get(month_word.lower()):
+            out.append(f"{year}-{month:02d}-{int(day):02d}")
+    for m in RE_DATE_NUM.finditer(text or ""):
+        day, month, year = (int(x) for x in m.groups())
+        if 1 <= month <= 12 and 1 <= day <= 31:
+            out.append(f"{year}-{month:02d}-{day:02d}")
+    return out
+
+
+def _hint_number(value: object) -> float | None:
+    """Число, которое имела в виду модель, из чего бы она его ни сделала."""
+    if isinstance(value, bool) or value is None:
+        return None
+    if isinstance(value, (int, float)):
+        return float(value)
+    found = numbers_in(str(value))
+    return found[0].digits if found else None
+
+
+def normalize(field: Field, value: object, quote: str) -> Normalized:
+    """Значение поля из проверенной цитаты, с подсказкой от модели.
+
+    Вызывается ПОСЛЕ `quote_ok`: без прошедшей цитаты нормализовать нечего.
+    Любая неудача — `ok=False` и `None`, никогда 0 и никогда «примерно».
+    """
+    if value is None:
+        return Normalized(None, True, "поле пустое по мнению модели")
+
+    if field.kind in (MONEY, PERCENT, INT):
+        hint = _hint_number(value)
+        found = pick_number(quote, hint)
+        if found is None:
+            return Normalized(None, False, f"числа {hint} нет в цитате")
+        if found.verdict == РАСХОДИТСЯ:
+            return Normalized(None, False,
+                              f"цифры {found.digits} расходятся с прописью {found.words}",
+                              found.verdict)
+        if field.kind == INT:
+            if found.digits != int(found.digits):
+                return Normalized(None, False, f"{found.digits} не целое")
+            return Normalized(int(found.digits), True, verdict=found.verdict)
+        return Normalized(found.digits, True, verdict=found.verdict)
+
+    if field.kind == DATE:
+        hint = parse_date_ru(str(value))
+        found = dates_in(quote)
+        if not found:
+            return Normalized(None, False, "в цитате нет даты")
+        if hint and hint not in found:
+            return Normalized(None, False, f"даты {hint} нет в цитате: {found}")
+        return Normalized(hint or found[0], True)
+
+    if field.kind == BOOL:
+        if isinstance(value, bool):
+            return Normalized(value, True)
+        return Normalized(None, False, f"{value!r} — не true/false")
+
+    if field.kind == ENUM:
+        allowed = [x.strip() for x in field.descr.split("|")]
+        text = str(value).strip()
+        if text not in allowed:
+            return Normalized(None, False, f"{text!r} не из списка {allowed}")
+        return Normalized(text, True)
+
+    text = str(value).strip()
+    return Normalized(text or None, bool(text), "" if text else "пустая строка")

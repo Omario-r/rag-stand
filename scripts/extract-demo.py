@@ -33,9 +33,13 @@ sys.path.insert(0, str(STAND / "src"))
 from rag_lab import db as DB  # noqa: E402
 from rag_lab.extract import (  # noqa: E402
     CORE_FIELDS,
+    INT,
+    MONEY,
+    PERCENT,
     TRANSPORT_FIELDS,
     inn_valid,
     json_schema,
+    normalize,
     parse_amount_ru,
     parse_date_ru,
     quote_ok,
@@ -101,12 +105,16 @@ def part_3() -> None:
         "500 000 (пятьсот тысяч) рублей по каждому случаю",
         "4 500 000 (четыре миллиона пятьдесят тысяч) рублей",   # опечатка в прописи
     ]
-    print(f"{'текст':58s} {'цифры':>10} {'пропись':>10}  сходится")
+    cases.append("0,1 (одной десятой) процента за каждый день просрочки")
+    print(f"{'текст':58s} {'цифры':>10} {'пропись':>10}  вердикт")
     for s in cases:
         a = parse_amount_ru(s)
-        print(f"  {s[:56]:56s} {a.digits!s:>10} {a.words!s:>10}  {'да' if a.agrees else 'НЕТ'}")
-    print("\nПоследняя строка — договор с опечаткой. Расхождение цифр и прописи")
+        print(f"  {s[:56]:56s} {a.digits!s:>10} {a.words!s:>10}  {a.verdict}")
+    print("\nПредпоследняя строка — договор с опечаткой. Расхождение цифр и прописи")
     print("не ошибка кода, а сигнал: такое значение показывают человеку.")
+    print("\nПоследняя — проценты. Вердиктов три, а не два: «не сверено» и")
+    print("«расходится» — разные вещи, и слить их в один флаг значит либо")
+    print("слать человеку половину корпуса, либо не слать ничего.")
 
 
 def part_4() -> None:
@@ -220,22 +228,25 @@ def part_7() -> None:
           f"вывод: {reply.completion_tokens} токенов "
           f"({reply.tokens_per_second:.1f} ток./с)")
 
-    print("\n--- Нормализация кодом: из значения модели против из цитаты ---")
-    print(f"{'поле':16s} {'источник':10s} {'что разбирали':40s} итог")
-    for name in ("doc_date", "date_end"):
+    print("\n--- Нормализация: значение из цитаты, подсказка от модели ---")
+    print(f"{'поле':18s} {'тип':8s} {'подсказка':12s} {'значение':12s} вердикт / причина")
+    numeric = {MONEY, PERCENT, INT}
+    for name, f in fields.items():
         got = reply.data.get(name) or {}
-        for src, text in (("value", got.get("value")), ("цитата", got.get("quote"))):
-            print(f"  {name:14s} {src:10s} {str(text)[:38]:40s} {parse_date_ru(str(text or ''))}")
-    for name in ("amount", "demurrage_rate", "penalty_delay"):
-        got = reply.data.get(name) or {}
-        for src, text in (("value", got.get("value")), ("цитата", got.get("quote"))):
-            a = parse_amount_ru(str(text or ""))
-            print(f"  {name:14s} {src:10s} {str(text)[:38]:40s} {a.value}"
-                  f"  {'цифры=пропись' if a.agrees else 'пропись не с чем сверить'}")
+        n = normalize(f, got.get("value"), got.get("quote", ""))
+        if not n.ok:
+            note = f"-> pending: {n.reason}"
+        elif f.kind in numeric and n.value is not None:
+            note = f"цифры/пропись: {n.verdict}"
+        else:
+            note = ""
+        print(f"  {name:16s} {f.kind:8s} {str(got.get('value'))[:10]:12s} "
+              f"{str(n.value)[:12]:14s} {note}")
 
-    print("\nМодель нормализует значения сама, хотя промпт просит писать как")
-    print("в документе. Цитата же проверена на вхождение — значит, в ней пропись")
-    print("сохранена, и сверять цифры с прописью надо по ней, а не по value.")
+    print("\nЗначение берётся из цитаты, прошедшей проверку вхождением, а ответ")
+    print("модели служит подсказкой: он говорит, какое из чисел цитаты имеется")
+    print("в виду. Иначе сверка цифр с прописью пропадает — модель нормализует")
+    print("сама, вопреки промпту, и пропись до кода не доходит.")
 
     print("\nnull — не провал, а честный ответ. Опасна обратная ошибка:")
     print("заполненное поле с цитатой, которой в документе нет.")
