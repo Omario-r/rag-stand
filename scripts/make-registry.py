@@ -1,0 +1,498 @@
+"""Реестр контрагентов и дел для партии 2 корпуса.
+
+Этап «партия 2» — RAG/06-roadmap.md. Решение — RAG/12-decisions.md, 10.08.2026.
+
+ЗАЧЕМ РЕЕСТР, А НЕ ПРОСТО «ПРИДУМАТЬ КОМПАНИИ ПО ХОДУ».
+
+Партию 2 пишут несколько авторов параллельно, каждый по своей спецификации
+и не видя чужих документов. Три вещи такой автор придумать не может, потому
+что они общие для всего корпуса:
+
+1. ИНН с верной контрольной суммой. В партии 1 не проходит ни один — они
+   выдуманы, и связку «контрагент = ИНН» проверять не на чем: все контрагенты
+   уходят в очередь ручного сопоставления. Человек ошибается в контрольной
+   сумме незаметно, поэтому её считает код.
+2. Повторное появление контрагента. «Все договоры с Ромашкой» — вопрос,
+   на котором проверяются фильтры по payload; если каждый договор изобретает
+   своего контрагента, проверять нечего. Реестр назначает, кто в каких делах
+   участвует, ещё до написания текстов.
+3. Пропись, совпадающая с цифрами. Договор пишет «6 200 000 (шесть миллионов
+   двести тысяч) рублей», и расхождение между цифрами и прописью мы ловим
+   и показываем человеку — но саму эту проверку надо на чём-то проверять.
+   Автор, пишущий пропись руками, рано или поздно ошибётся, и мы не узнаем,
+   поймала ошибку проверка или пропустила.
+
+ПАРТИЯ 1 ВХОДИТ В РЕЕСТР, НО НЕ МЕНЯЕТСЯ. Её шесть организаций перечислены
+здесь с фактическими (невалидными) ИНН и пометкой «не менять»: на партии 1
+сделаны все замеры 08–10.08.2026, и правка её реквизитов рассогласовала бы
+цифры журнала экспериментов. Смешанный корпус даже полезнее — он проходит
+обе ветки кода: валидный ИНН связывается с контрагентом, невалидный уходит
+в очередь.
+
+Запуск:
+
+    uv run python scripts/make-registry.py                # создать реестр
+    uv run python scripts/make-registry.py --check        # проверить готовый
+
+Проверка — не формальность: она пересчитывает контрольные суммы и пропись
+заново и сверяет с записанным, то есть ловит и правку файла руками.
+"""
+
+from __future__ import annotations
+
+import argparse
+import random
+import sys
+from datetime import date, timedelta
+from pathlib import Path
+
+import yaml
+
+STAND = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(STAND / "src"))
+
+from rag_lab.extract import inn_valid  # noqa: E402
+
+OUT = STAND / "corpus" / "registry.yaml"
+SEED = 20260810
+
+# --- Числа прописью --------------------------------------------------------
+# Нужны здесь, а не в rag_lab: пайплайн пропись только РАЗБИРАЕТ
+# (extract.parse_amount_ru), а пишет её единственный автор — этот скрипт.
+
+_ONES_M = ["", "один", "два", "три", "четыре", "пять", "шесть", "семь",
+           "восемь", "девять", "десять", "одиннадцать", "двенадцать",
+           "тринадцать", "четырнадцать", "пятнадцать", "шестнадцать",
+           "семнадцать", "восемнадцать", "девятнадцать"]
+_ONES_F = _ONES_M.copy()
+_ONES_F[1], _ONES_F[2] = "одна", "две"
+_TENS = ["", "", "двадцать", "тридцать", "сорок", "пятьдесят", "шестьдесят",
+         "семьдесят", "восемьдесят", "девяносто"]
+_HUNDREDS = ["", "сто", "двести", "триста", "четыреста", "пятьсот",
+             "шестьсот", "семьсот", "восемьсот", "девятьсот"]
+
+
+def _plural(n: int, one: str, few: str, many: str) -> str:
+    """Русское согласование числительного: 1 рубль, 2 рубля, 5 рублей."""
+    if n % 100 in range(11, 15):
+        return many
+    if n % 10 == 1:
+        return one
+    if n % 10 in (2, 3, 4):
+        return few
+    return many
+
+
+def _group_words(n: int, female: bool) -> list[str]:
+    """Трёхзначная группа словами."""
+    ones = _ONES_F if female else _ONES_M
+    out = []
+    if n >= 100:
+        out.append(_HUNDREDS[n // 100])
+        n %= 100
+    if n >= 20:
+        out.append(_TENS[n // 10])
+        n %= 10
+    if n:
+        out.append(ones[n])
+    return out
+
+
+def rubles_in_words(amount: int) -> str:
+    """Целое число рублей прописью, без слова «рублей».
+
+    Копеек в договорных суммах корпуса нет намеренно: дробная часть добавила бы
+    второй разряд согласования, ничего не проверяя сверх уже проверяемого.
+    """
+    if amount == 0:
+        return "ноль"
+    groups = [
+        (10 ** 9, False, ("миллиард", "миллиарда", "миллиардов")),
+        (10 ** 6, False, ("миллион", "миллиона", "миллионов")),
+        (10 ** 3, True, ("тысяча", "тысячи", "тысяч")),
+    ]
+    words: list[str] = []
+    rest = amount
+    for base, female, forms in groups:
+        count, rest = divmod(rest, base)
+        if count:
+            words += _group_words(count, female)
+            words.append(_plural(count, *forms))
+    if rest:
+        words += _group_words(rest, False)
+    return " ".join(words)
+
+
+def money(amount: int) -> dict:
+    """Сумма в том виде, в каком она пойдёт в текст договора."""
+    return {
+        "число": amount,
+        "прописью": rubles_in_words(amount),
+        "в_тексте": f"{amount:,} ({rubles_in_words(amount)}) рублей".replace(",", " "),
+    }
+
+
+# --- Контрольные суммы -----------------------------------------------------
+# Проверку ИНН не дублируем: rag_lab.extract.inn_valid уже написана и покрыта
+# тестами. Здесь только обратная операция — досчитать контрольную цифру.
+
+def _inn10(rnd: random.Random, region: str) -> str:
+    body = region + "".join(str(rnd.randint(0, 9)) for _ in range(6))
+    w = [2, 4, 10, 3, 5, 9, 4, 6, 8]
+    return body + str(sum(int(d) * k for d, k in zip(body, w)) % 11 % 10)
+
+
+def _inn12(rnd: random.Random, region: str) -> str:
+    # 10 знаков тела плюс две контрольные цифры: тело здесь короче, чем у ИНН
+    # юрлица, а не длиннее — контрольных цифр две вместо одной.
+    body = region + "".join(str(rnd.randint(0, 9)) for _ in range(7))
+    w1 = [7, 2, 4, 10, 3, 5, 9, 4, 6, 8]
+    w2 = [3, 7, 2, 4, 10, 3, 5, 9, 4, 6, 8]
+    body += str(sum(int(d) * k for d, k in zip(body, w1)) % 11 % 10)
+    return body + str(sum(int(d) * k for d, k in zip(body, w2)) % 11 % 10)
+
+
+def ogrn_valid(ogrn: str) -> bool:
+    """ОГРН 13 знаков — остаток от деления первых 12 на 11; ОГРНИП 15 — на 13."""
+    if len(ogrn) == 13:
+        return int(ogrn[12]) == int(ogrn[:12]) % 11 % 10
+    if len(ogrn) == 15:
+        return int(ogrn[14]) == int(ogrn[:14]) % 13 % 10
+    return False
+
+
+def _ogrn(rnd: random.Random, ip: bool = False) -> str:
+    n = 14 if ip else 12
+    first = "3" if ip else "1"
+    body = first + "".join(str(rnd.randint(0, 9)) for _ in range(n - 1))
+    return body + str(int(body) % (13 if ip else 11) % 10)
+
+
+def _kpp(inn: str) -> str:
+    """КПП контрольной суммы не имеет: код инспекции + причина + порядковый."""
+    return inn[:4] + "01001"
+
+
+# --- Словари для названий --------------------------------------------------
+# Разнообразие формулировок задаётся спецификацией автора, а разнообразие
+# НАЗВАНИЙ — здесь: иначе тридцать договоров населят «ТрансЛогистик-1…30».
+
+_PREFIX = ["Транс", "Авто", "Гранд", "Сиб", "Урал", "Волга", "Норд", "Мега",
+           "Прайм", "Балт", "Дон", "Аль"]
+_ROOT = ["Логистик", "Экспресс", "Карго", "Лайн", "Путь", "Трейд", "Сервис",
+         "Груз", "Терминал", "Флот", "Рейс", "Склад"]
+_PLAIN = ["Ромашка", "Берёзка", "Заря", "Восход", "Причал", "Магистраль",
+          "Перекрёсток", "Меридиан", "Пирамида", "Компас", "Ясень", "Исток"]
+_CITY = [("Москва", "77"), ("Санкт-Петербург", "78"), ("Екатеринбург", "66"),
+         ("Новосибирск", "54"), ("Казань", "16"), ("Самара", "63"),
+         ("Ростов-на-Дону", "61"), ("Нижний Новгород", "52")]
+_STREET = ["Промышленная", "Складская", "Заводская", "Портовая", "Логистическая",
+           "Транспортная", "Магистральная", "Индустриальная"]
+_SURNAME = ["Иванов", "Петров", "Сидоров", "Кузнецов", "Морозов", "Волков",
+            "Соколов", "Лебедев", "Новиков", "Фёдоров", "Егоров", "Павлов",
+            "Зайцев", "Тарасов", "Белов", "Крылов"]
+_NAME = [("Иван", "Петрович"), ("Сергей", "Николаевич"), ("Дмитрий", "Олегович"),
+         ("Алексей", "Игоревич"), ("Андрей", "Викторович"), ("Павел", "Юрьевич"),
+         ("Максим", "Андреевич"), ("Роман", "Сергеевич")]
+_NAME_F = [("Анна", "Викторовна"), ("Елена", "Сергеевна"), ("Ольга", "Ивановна"),
+           ("Марина", "Дмитриевна"), ("Татьяна", "Олеговна")]
+_POST = ["генерального директора", "директора", "коммерческого директора",
+         "исполнительного директора"]
+
+# Типы договоров те же, что в партии 1: новые не заводим (решение 10.08.2026).
+# Роли — как стороны названы в тексте; на них же проверяется, что «контрагент»
+# опознаётся по ИНН, а не по слову «Заказчик».
+_TYPES = {
+    "перевозка": ("ТР", ("Заказчик", "Перевозчик")),
+    "экспедирование": ("ЭКС", ("Клиент", "Экспедитор")),
+    "аренда_ТС": ("АР", ("Арендодатель", "Арендатор")),
+    "хранение": ("ХР", ("Поклажедатель", "Хранитель")),
+}
+
+# --- Партия 1: как есть, не менять ----------------------------------------
+
+BATCH_1_ORGS = [
+    ("7701234567", "ООО «Ромашка»", "Москва", ["Заказчик"]),
+    ("7809876543", "ООО «ТрансЛогистик»", "Санкт-Петербург", ["Перевозчик"]),
+    ("7810111213", "ООО «Северный Путь»", "Санкт-Петербург", ["Клиент"]),
+    ("6316543210", "ООО «Волга-Транс»", "Самара", ["Экспедитор"]),
+    ("666012345678", "ИП Иванов Пётр Сергеевич", "Екатеринбург", ["Арендодатель"]),
+    ("6672334455", "ООО «УралГрузСервис»", "Екатеринбург", ["Арендатор"]),
+]
+
+BATCH_1_CASES = [
+    ("TR-114", "перевозка", "ТР-114/2026", "2026-03-12", True),
+    ("EKS-77", "экспедирование", "ЭКС-77/2026", "2026-02-01", False),
+    ("AR-203", "аренда_ТС", "АР-203/2026", "2026-01-20", False),
+    ("SH-45", "хранение", "ХР-45/2026", "2026-04-05", False),
+]
+
+
+def _name_variants(short: str) -> list[str]:
+    """Три написания одной компании — то, ради чего контрагент опознаётся по ИНН.
+
+    Для SQL «ООО «Ромашка»», «ООО "Ромашка"» и полная форма — три разные
+    компании, и вопрос «все договоры с Ромашкой» вернёт треть правды.
+    """
+    if short.startswith("ИП"):
+        return [short, short.replace("ИП ", "Индивидуальный предприниматель ")]
+    core = short.split("«")[1].rstrip("»")
+    return [
+        f'ООО "{core}"',
+        f"ООО {core}",
+        f"Общество с ограниченной ответственностью «{core}»",
+    ]
+
+
+def make_orgs(rnd: random.Random, n_new: int) -> list[dict]:
+    orgs: list[dict] = []
+    for inn, short, city, roles in BATCH_1_ORGS:
+        orgs.append({
+            "инн": inn,
+            "название_кратко": short,
+            "название_полно": _name_variants(short)[-1],
+            "варианты_написания": _name_variants(short)[:-1],
+            "город": city,
+            "роли": roles,
+            "партия": 1,
+            "инн_валиден": inn_valid(inn),
+            "примечание": "из партии 1, не менять: на этом корпусе сделаны замеры 08–10.08.2026",
+        })
+
+    used_cores: set[str] = set()
+    for _ in range(n_new):
+        city, region = rnd.choice(_CITY)
+        ip = rnd.random() < 0.15
+        if ip:
+            sur = rnd.choice(_SURNAME)
+            first, patr = rnd.choice(_NAME)
+            short = f"ИП {sur} {first} {patr}"
+            inn = _inn12(rnd, region + "0")
+            org = {"огрнип": _ogrn(rnd, ip=True)}
+        else:
+            while True:
+                core = (rnd.choice(_PLAIN) if rnd.random() < 0.4
+                        else rnd.choice(_PREFIX) + rnd.choice(_ROOT))
+                if core not in used_cores:
+                    used_cores.add(core)
+                    break
+            short = f"ООО «{core}»"
+            inn = _inn10(rnd, region + "0")
+            org = {"кпп": _kpp(inn), "огрн": _ogrn(rnd)}
+
+        sur = rnd.choice(_SURNAME)
+        female = rnd.random() < 0.25
+        first, patr = rnd.choice(_NAME_F if female else _NAME)
+        if female:
+            sur += "а"
+
+        variants = _name_variants(short)
+        org.update({
+            "инн": inn,
+            "название_кратко": short,
+            "название_полно": variants[-1],
+            "варианты_написания": variants[:-1],
+            "город": city,
+            "адрес": f"{city}, ул. {rnd.choice(_STREET)}, д. {rnd.randint(1, 90)}",
+            "руководитель": {
+                "фио": f"{sur} {first} {patr}",
+                "должность": "индивидуальный предприниматель" if ip else rnd.choice(_POST),
+                "действует_на_основании": "свидетельства" if ip else "Устава",
+            },
+            "роли": [],
+            "партия": 2,
+            "инн_валиден": True,
+        })
+        orgs.append(org)
+    return orgs
+
+
+def make_cases(rnd: random.Random, orgs: list[dict], n_new: int) -> list[dict]:
+    """Дела: кто с кем, когда, на сколько.
+
+    Контрагенты назначаются так, чтобы каждый встретился в 2–4 делах: иначе
+    вопрос «все договоры с этим перевозчиком» проверять не на чем.
+    """
+    cases: list[dict] = []
+    for cid, kind, number, signed, has_ds in BATCH_1_CASES:
+        cases.append({
+            "дело": cid, "тип": kind, "номер": number, "дата": signed,
+            "партия": 1, "допсоглашение": has_ds,
+            "примечание": "из партии 1, документы уже написаны",
+        })
+
+    pool = [o for o in orgs if o["партия"] == 2]
+    counts = {o["инн"]: 0 for o in pool}
+    seq = {code: 300 for code, _ in _TYPES.values()}
+
+    for _ in range(n_new):
+        kind = rnd.choice(list(_TYPES))
+        code, (role_a, role_b) = _TYPES[kind]
+        seq[code] += rnd.randint(1, 7)
+
+        # Из наименее занятых, чтобы никто не остался с одним договором.
+        ranked = sorted(pool, key=lambda o: (counts[o["инн"]], rnd.random()))
+        a, b = ranked[0], ranked[1]
+        counts[a["инн"]] += 1
+        counts[b["инн"]] += 1
+        for org, role in ((a, role_a), (b, role_b)):
+            if role not in org["роли"]:
+                org["роли"].append(role)
+
+        signed = date(2025, 1, 1) + timedelta(days=rnd.randint(0, 640))
+        months = rnd.choice([12, 12, 18, 24, 36])
+        amount = rnd.choice([1_200_000, 2_500_000, 3_800_000, 4_500_000,
+                             6_200_000, 8_000_000, 12_400_000, 15_000_000])
+        has_ds = rnd.random() < 0.30
+        case = {
+            "дело": f"{code}-{seq[code]}",
+            "тип": kind,
+            "номер": f"{code}-{seq[code]}/{signed.year}",
+            "дата": signed.isoformat(),
+            "срок_месяцев": months,
+            "дата_окончания": (signed + timedelta(days=months * 30)).isoformat(),
+            "стороны": [
+                {"роль": role_a, "инн": a["инн"], "название": a["название_кратко"]},
+                {"роль": role_b, "инн": b["инн"], "название": b["название_кратко"]},
+            ],
+            "предельная_сумма": money(amount),
+            "ставка_простоя": money(rnd.choice([800, 1_200, 1_500, 1_800, 2_400])),
+            "бесплатное_время_часов": rnd.choice([2, 4, 6, 8, 12]),
+            "срок_оплаты_дней": rnd.choice([5, 7, 10, 14, 20, 30]),
+            "неустойка_процент": rnd.choice([0.05, 0.1, 0.15, 0.2]),
+            "приложение": rnd.random() < 0.40,
+            "допсоглашение": has_ds,
+            "партия": 2,
+        }
+        if has_ds:
+            ds_date = signed + timedelta(days=rnd.randint(60, 400))
+            case["допсоглашение_детали"] = {
+                "дата": ds_date.isoformat(),
+                "меняет": rnd.sample(
+                    ["предельная_сумма", "срок_оплаты_дней", "ставка_простоя",
+                     "дата_окончания"], k=rnd.randint(2, 4)),
+                "новая_сумма": money(int(amount * rnd.choice([1.2, 1.4, 1.5]))),
+            }
+        cases.append(case)
+    return cases
+
+
+def build(seed: int, n_orgs: int, n_cases: int) -> dict:
+    rnd = random.Random(seed)
+    orgs = make_orgs(rnd, n_orgs)
+    cases = make_cases(rnd, orgs, n_cases)
+    return {
+        "мета": {
+            "создан": date.today().isoformat(),
+            "seed": seed,
+            "чем": "scripts/make-registry.py",
+            "зачем": (
+                "Общие для всей партии 2 реквизиты: ИНН с верной контрольной "
+                "суммой, повторяющиеся контрагенты, суммы с прописью. "
+                "Авторы документов берут значения отсюда и не придумывают свои."
+            ),
+            "организаций": len(orgs),
+            "дел": len(cases),
+            "из_партии_1": sum(1 for c in cases if c["партия"] == 1),
+        },
+        "организации": orgs,
+        "дела": cases,
+    }
+
+
+def check(data: dict) -> list[str]:
+    """Пересчитать всё, что можно пересчитать, и сверить с записанным."""
+    bad: list[str] = []
+    seen_inn: set[str] = set()
+
+    for o in data["организации"]:
+        inn = o["инн"]
+        if inn in seen_inn:
+            bad.append(f"ИНН {inn} встречается дважды")
+        seen_inn.add(inn)
+        if inn_valid(inn) != o["инн_валиден"]:
+            bad.append(f"{inn}: пометка «инн_валиден» разошлась с контрольной суммой")
+        if o["партия"] == 2 and not inn_valid(inn):
+            bad.append(f"{inn}: партия 2, а контрольная сумма не сходится")
+        for key in ("огрн", "огрнип"):
+            if key in o and not ogrn_valid(o[key]):
+                bad.append(f"{inn}: {key} {o[key]} не проходит контрольную сумму")
+
+    known = {o["инн"] for o in data["организации"]}
+    seen_case: set[str] = set()
+    for c in data["дела"]:
+        if c["дело"] in seen_case:
+            bad.append(f"дело {c['дело']} встречается дважды")
+        seen_case.add(c["дело"])
+        for side in c.get("стороны", []):
+            if side["инн"] not in known:
+                bad.append(f"{c['дело']}: сторона {side['инн']} не в реестре")
+        for key in ("предельная_сумма", "ставка_простоя"):
+            m = c.get(key)
+            if m and m["прописью"] != rubles_in_words(m["число"]):
+                bad.append(f"{c['дело']}: пропись «{key}» разошлась с числом")
+        ds = c.get("допсоглашение_детали")
+        if ds:
+            if ds["дата"] <= c["дата"]:
+                bad.append(f"{c['дело']}: допсоглашение не позже договора")
+            if ds["новая_сумма"]["прописью"] != rubles_in_words(ds["новая_сумма"]["число"]):
+                bad.append(f"{c['дело']}: пропись новой суммы разошлась с числом")
+
+    lonely = [inn for inn in known
+              if sum(1 for c in data["дела"]
+                     for s in c.get("стороны", []) if s["инн"] == inn) == 1]
+    if lonely:
+        bad.append(f"контрагентов ровно с одним договором: {len(lonely)} — "
+                   "фильтр «все договоры с этим контрагентом» на них не проверить")
+    return bad
+
+
+def main() -> None:
+    ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
+    ap.add_argument("--seed", type=int, default=SEED)
+    ap.add_argument("--orgs", type=int, default=16, help="новых организаций")
+    ap.add_argument("--cases", type=int, default=26, help="новых дел")
+    ap.add_argument("--out", type=Path, default=OUT)
+    ap.add_argument("--check", action="store_true", help="проверить готовый реестр")
+    args = ap.parse_args()
+
+    if args.check:
+        if not args.out.exists():
+            sys.exit(f"нет файла {args.out}")
+        data = yaml.safe_load(args.out.read_text(encoding="utf-8"))
+        problems = check(data)
+        for p in problems:
+            print("  ✗", p)
+        n_o, n_c = len(data["организации"]), len(data["дела"])
+        print(f"\n{args.out.name}: "
+              f"{n_o} {_plural(n_o, 'организация', 'организации', 'организаций')}, "
+              f"{n_c} {_plural(n_c, 'дело', 'дела', 'дел')} — "
+              + ("проверка пройдена" if not problems else
+                 f"{len(problems)} {_plural(len(problems), 'замечание', 'замечания', 'замечаний')}"))
+        sys.exit(1 if problems else 0)
+
+    data = build(args.seed, args.orgs, args.cases)
+    args.out.write_text(
+        yaml.safe_dump(data, allow_unicode=True, sort_keys=False, width=100),
+        encoding="utf-8")
+
+    m = data["мета"]
+    orgs_w = _plural(m["организаций"], "организация", "организации", "организаций")
+    cases_w = _plural(m["дел"], "дело", "дела", "дел")
+    try:
+        shown = args.out.relative_to(STAND)
+    except ValueError:      # --out увели за пределы стенда, печатаем как есть
+        shown = args.out
+    print(f"{shown}: {m['организаций']} {orgs_w}, "
+          f"{m['дел']} {cases_w} (из них {m['из_партии_1']} из партии 1), "
+          f"seed {m['seed']}")
+    problems = check(data)
+    if problems:
+        for p in problems:
+            print("  ✗", p)
+        sys.exit(1)
+    print("проверка пройдена: контрольные суммы, пропись, ссылки на стороны")
+
+
+if __name__ == "__main__":
+    main()
