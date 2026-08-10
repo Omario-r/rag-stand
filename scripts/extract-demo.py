@@ -1,11 +1,13 @@
-"""Извлечение реквизитов: всё, что делается БЕЗ генеративной модели. Этап 7.
+"""Извлечение реквизитов договора в SQL. Этап 7.
 
-На стенде нет генеративной модели, поэтому шаг «модель заполняет схему»
-здесь не выполняется. Выполняется всё остальное, а его больше:
+Разделы 1-6 идут без модели, и их больше, чем самого извлечения:
 
   1. нормализация кодом — даты, суммы с проверкой прописи, ИНН;
   2. проверка цитат — барьер против тихой галлюцинации;
   3. схема БД с историей значений и сравнение с наивной «строка = файл».
+
+Разделы 7-8 требуют поднятой генеративной модели (`./run-llm.sh`, порт 8084)
+и переменной `LLM_URL` в `.env`.
 
 Значения полей ниже взяты из корпуса РУКАМИ — это разметка, а не извлечение.
 Она и нужна: без разметки нечем измерять accuracy извлечения, когда модель
@@ -180,11 +182,101 @@ def part_6() -> None:
 
 
 def part_7() -> None:
-    print("Не сделано, потому что на стенде нет генеративной модели:")
-    print("  - собственно извлечение: фрагменты -> response_format -> заполненные поля;")
-    print("  - разметка 10-15 договоров и accuracy ПО КАЖДОМУ ПОЛЮ;")
-    print("  - доля null по каждому полю как диагностика полноты.")
-    print("\nВсё, что до и после модели, готово и проверено выше.")
+    """Собственно извлечение: документ -> response_format -> заполненные поля."""
+    from rag_lab.extract import prompt_for
+    from rag_lab.llm import Llm
+
+    fields = {**CORE_FIELDS, **TRANSPORT_FIELDS}
+    llm = Llm()
+    schema = json_schema(fields)
+    prompt = prompt_for(fields, BASE)
+
+    print(f"документ: TR-114-2026.md, {len(BASE)} символов, "
+          f"{llm.tokens(BASE)} токенов по токенизатору ЭТОЙ модели")
+    print(f"промпт с описанием {len(fields)} полей: {llm.tokens(prompt)} токенов\n")
+
+    reply = llm.fill(prompt, schema)
+
+    print(f"{'поле':18s} {'значение':32s} {'цитата':10s} пункт")
+    print("-" * 74)
+    filled = passed = 0
+    for name in fields:
+        got = reply.data.get(name)
+        if not got or got.get("value") is None:
+            print(f"  {name:16s} {'null':32s}")
+            continue
+        filled += 1
+        value = str(got["value"])
+        ok = quote_ok(BASE, got.get("quote", ""))
+        passed += ok
+        print(f"  {name:16s} {value[:30]:32s} {'прошла' if ok else 'ОТКЛОНЕНА':10s} "
+              f"{got.get('clause') or '—'}")
+
+    print("-" * 74)
+    print(f"заполнено: {filled} из {len(fields)}   "
+          f"цитата прошла: {passed} из {filled}   "
+          f"null: {len(fields) - filled}")
+    print(f"задержка: {reply.seconds:.1f} с   "
+          f"вывод: {reply.completion_tokens} токенов "
+          f"({reply.tokens_per_second:.1f} ток./с)")
+
+    print("\n--- Нормализация кодом: из значения модели против из цитаты ---")
+    print(f"{'поле':16s} {'источник':10s} {'что разбирали':40s} итог")
+    for name in ("doc_date", "date_end"):
+        got = reply.data.get(name) or {}
+        for src, text in (("value", got.get("value")), ("цитата", got.get("quote"))):
+            print(f"  {name:14s} {src:10s} {str(text)[:38]:40s} {parse_date_ru(str(text or ''))}")
+    for name in ("amount", "demurrage_rate", "penalty_delay"):
+        got = reply.data.get(name) or {}
+        for src, text in (("value", got.get("value")), ("цитата", got.get("quote"))):
+            a = parse_amount_ru(str(text or ""))
+            print(f"  {name:14s} {src:10s} {str(text)[:38]:40s} {a.value}"
+                  f"  {'цифры=пропись' if a.agrees else 'пропись не с чем сверить'}")
+
+    print("\nМодель нормализует значения сама, хотя промпт просит писать как")
+    print("в документе. Цитата же проверена на вхождение — значит, в ней пропись")
+    print("сохранена, и сверять цифры с прописью надо по ней, а не по value.")
+
+    print("\nnull — не провал, а честный ответ. Опасна обратная ошибка:")
+    print("заполненное поле с цитатой, которой в документе нет.")
+
+
+def part_8() -> None:
+    """Воспроизводимость: три прогона одного и того же должны совпасть."""
+    from rag_lab.extract import prompt_for
+    from rag_lab.llm import Llm
+
+    fields = {**CORE_FIELDS, **TRANSPORT_FIELDS}
+    llm = Llm()
+    schema, prompt = json_schema(fields), prompt_for(fields, BASE)
+
+    runs = []
+    for i in range(3):
+        r = llm.fill(prompt, schema)
+        runs.append(r)
+        print(f"  прогон {i + 1}: {r.seconds:5.1f} с, {r.completion_tokens} токенов вывода")
+
+    same = all(r.data == runs[0].data for r in runs)
+    print(f"\nтри прогона {'СОВПАЛИ' if same else 'РАЗОШЛИСЬ'} побайтно")
+    if not same:
+        for name in fields:
+            vals = {json.dumps(r.data.get(name), ensure_ascii=False, sort_keys=True) for r in runs}
+            if len(vals) > 1:
+                print(f"  расходится {name}:")
+                for v in vals:
+                    print(f"    {v[:96]}")
+    print("\nБез этого свойства ни accuracy, ни сравнение промптов не имеют смысла:")
+    print("сдвиг метрики нельзя отличить от разброса модели.")
+
+
+def part_9() -> None:
+    print("Сделано и замерено выше: извлечение, доля null, проверка цитат,")
+    print("воспроизводимость, задержка.")
+    print("\nНе сделано, и упирается НЕ в модель, а в корпус:")
+    print("  - accuracy ПО КАЖДОМУ ПОЛЮ: нужна разметка 10-15 договоров,")
+    print("    на пяти документах партии 1 по 18 полям её не посчитать;")
+    print("  - доля ложных значений: та же разметка;")
+    print("  - связка «контрагент = ИНН»: ИНН партии 1 не проходят контрольную сумму.")
 
 
 PARTS = {
@@ -194,7 +286,9 @@ PARTS = {
     4: ("Контрольная сумма ИНН", part_4),
     5: ("Проверка цитаты — барьер против тихой галлюцинации", part_5),
     6: ("История значений: договор + допсоглашение", part_6),
-    7: ("Что осталось до готовности этапа", part_7),
+    7: ("Извлечение моделью: первый прогон", part_7),
+    8: ("Воспроизводимость: три прогона подряд", part_8),
+    9: ("Что осталось до готовности этапа", part_9),
 }
 
 
