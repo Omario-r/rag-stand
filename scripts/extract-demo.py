@@ -190,7 +190,13 @@ def part_6() -> None:
 
 
 def part_7() -> None:
-    """Собственно извлечение: документ -> response_format -> заполненные поля."""
+    """Собственно извлечение: документ -> response_format -> заполненные поля.
+
+    С флагом --nullable схема возвращается к первой редакции, где поле-объект
+    допускал null. Это не музейный экспонат: именно та редакция дала null
+    во всех 18 полях, и воспроизводимость отказа важнее его отсутствия —
+    иначе главный урок этапа придётся читать, а не проходить.
+    """
     from rag_lab.extract import prompt_for
     from rag_lab.llm import Llm
 
@@ -198,6 +204,12 @@ def part_7() -> None:
     llm = Llm()
     schema = json_schema(fields)
     prompt = prompt_for(fields, BASE)
+
+    if "--nullable" in sys.argv:
+        for prop in schema["properties"].values():
+            prop["type"] = ["object", "null"]
+        print("СХЕМА ВОЗВРАЩЕНА К ПЕРВОЙ РЕДАКЦИИ: поле-объект допускает null.\n"
+              "Смотрите на долю null — остальные показатели тут бесполезны.\n")
 
     print(f"документ: TR-114-2026.md, {len(BASE)} символов, "
           f"{llm.tokens(BASE)} токенов по токенизатору ЭТОЙ модели")
