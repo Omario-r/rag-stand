@@ -122,6 +122,20 @@ def test_batch_1_inn_left_invalid():
     assert first and all(o["инн_валиден"] is False for o in first)
 
 
+def test_ip_count_is_requested_not_random():
+    """ИП задаётся числом: у него ИНН на 12 знаков — отдельная ветка проверки.
+
+    При вероятности 0,15 на шестнадцати организациях выпадало то одна, то три,
+    и ветка могла остаться проверенной на одном примере.
+    """
+    for n_ip in (0, 1, 4, 7):
+        data = mr.build(mr.SEED, 16, 8, n_ip)
+        new_ip = [o for o in data["организации"]
+                  if o["партия"] == 2 and o["название_кратко"].startswith("ИП")]
+        assert len(new_ip) == n_ip
+        assert all(len(o["инн"]) == 12 for o in new_ip)
+
+
 def test_check_catches_broken_words():
     """Проверка обязана ловить правку файла руками, а не только генератор."""
     data = mr.build(mr.SEED, 6, 8)

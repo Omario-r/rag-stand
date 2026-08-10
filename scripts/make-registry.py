@@ -244,8 +244,17 @@ def _name_variants(short: str) -> list[str]:
     ]
 
 
-def make_orgs(rnd: random.Random, n_new: int) -> list[dict]:
+def make_orgs(rnd: random.Random, n_new: int, n_ip: int) -> list[dict]:
+    """Организации: партия 1 как есть, новые — сгенерированные.
+
+    Сколько среди новых ИП — задаётся числом, а не вероятностью. У ИП ИНН
+    на 12 знаков с двумя контрольными цифрами, у юрлица на 10 с одной; это
+    разные ветки и в генераторе, и в проверке пайплайна. При «примерно 15 %»
+    на шестнадцати организациях выпадало то одна, то три — то есть ветка
+    могла остаться почти непроверенной, и заметить это было бы нечем.
+    """
     orgs: list[dict] = []
+    ip_idx = set(rnd.sample(range(n_new), min(n_ip, n_new)))
     for inn, short, city, roles in BATCH_1_ORGS:
         orgs.append({
             "инн": inn,
@@ -260,9 +269,9 @@ def make_orgs(rnd: random.Random, n_new: int) -> list[dict]:
         })
 
     used_cores: set[str] = set()
-    for _ in range(n_new):
+    for i in range(n_new):
         city, region = rnd.choice(_CITY)
-        ip = rnd.random() < 0.15
+        ip = i in ip_idx
         if ip:
             sur = rnd.choice(_SURNAME)
             first, patr = rnd.choice(_NAME)
@@ -377,9 +386,9 @@ def make_cases(rnd: random.Random, orgs: list[dict], n_new: int) -> list[dict]:
     return cases
 
 
-def build(seed: int, n_orgs: int, n_cases: int) -> dict:
+def build(seed: int, n_orgs: int, n_cases: int, n_ip: int = 4) -> dict:
     rnd = random.Random(seed)
-    orgs = make_orgs(rnd, n_orgs)
+    orgs = make_orgs(rnd, n_orgs, n_ip)
     cases = make_cases(rnd, orgs, n_cases)
     return {
         "мета": {
@@ -392,6 +401,7 @@ def build(seed: int, n_orgs: int, n_cases: int) -> dict:
                 "Авторы документов берут значения отсюда и не придумывают свои."
             ),
             "организаций": len(orgs),
+            "из_них_ИП": sum(1 for o in orgs if o["название_кратко"].startswith("ИП")),
             "дел": len(cases),
             "из_партии_1": sum(1 for c in cases if c["партия"] == 1),
         },
@@ -452,6 +462,8 @@ def main() -> None:
     ap.add_argument("--seed", type=int, default=SEED)
     ap.add_argument("--orgs", type=int, default=16, help="новых организаций")
     ap.add_argument("--cases", type=int, default=26, help="новых дел")
+    ap.add_argument("--ip", type=int, default=4,
+                    help="сколько из новых организаций — ИП (ИНН на 12 знаков)")
     ap.add_argument("--out", type=Path, default=OUT)
     ap.add_argument("--check", action="store_true", help="проверить готовый реестр")
     args = ap.parse_args()
@@ -471,7 +483,7 @@ def main() -> None:
                  f"{len(problems)} {_plural(len(problems), 'замечание', 'замечания', 'замечаний')}"))
         sys.exit(1 if problems else 0)
 
-    data = build(args.seed, args.orgs, args.cases)
+    data = build(args.seed, args.orgs, args.cases, args.ip)
     args.out.write_text(
         yaml.safe_dump(data, allow_unicode=True, sort_keys=False, width=100),
         encoding="utf-8")
