@@ -46,7 +46,7 @@ from rag_lab.extract import (  # noqa: E402
 )
 
 CORPUS = STAND / "corpus"
-DB_PATH = STAND / "cache" / "contracts.sqlite"
+DB_PATH = STAND / "data" / "contracts.sqlite"
 
 BASE = (CORPUS / "TR-114-2026.md").read_text(encoding="utf-8")
 DS1 = (CORPUS / "TR-114-2026-DS1.md").read_text(encoding="utf-8")
