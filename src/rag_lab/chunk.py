@@ -287,7 +287,15 @@ def parse_markdown(path: str | Path) -> tuple[str, list[Clause]]:
         # (RAG/lab-05-search.md).
         if (m := RE_HEADING.match(line)) and not RE_TITLE.match(line):
             head = m.group(1).strip()
-            if not clauses and current is None:
+            # Заголовок закрывает текущий пункт — как и нумерованный раздел.
+            # Без этого «## РЕКВИЗИТЫ И ПОДПИСИ СТОРОН» и весь блок под ним
+            # дописывались в текст последнего пункта: в допсоглашениях
+            # партии 2 он выходил 505 символов вместо 130, с ИНН, адресами
+            # и подписями обеих сторон внутри. У партии 1 не проявлялось —
+            # там реквизиты стоят нумерованным разделом (11.08.2026).
+            first = not clauses and current is None
+            flush()
+            if first:
                 # до первого пункта — это часть названия документа
                 doc_title = f"{doc_title} {head}".strip()
             elif part != "договор" and not section_title:
