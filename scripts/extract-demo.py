@@ -51,6 +51,20 @@ DB_PATH = STAND / "cache" / "contracts.sqlite"
 BASE = (CORPUS / "TR-114-2026.md").read_text(encoding="utf-8")
 DS1 = (CORPUS / "TR-114-2026-DS1.md").read_text(encoding="utf-8")
 
+
+def document() -> tuple[str, str]:
+    """Договор для разделов 7 и 8: по умолчанию TR-114, иначе --doc ИМЯ.
+
+    Заведено, чтобы проверить извлечение не на том документе, по которому
+    правились описания полей. Правка описаний по одному договору и проверка
+    на нём же — подгонка, и увидеть её можно только другим договором.
+    """
+    if "--doc" in sys.argv:
+        name = sys.argv[sys.argv.index("--doc") + 1]
+        path = CORPUS / (name if name.endswith(".md") else f"{name}.md")
+        return path.name, path.read_text(encoding="utf-8")
+    return "TR-114-2026.md", BASE
+
 # Разметка руками: (поле, значение, как написано, цитата, пункт)
 BASE_FIELDS = [
     ("amount", 4500000, "4 500 000 (четыре миллиона пятьсот тысяч) рублей 00 копеек",
@@ -200,10 +214,11 @@ def part_7() -> None:
     from rag_lab.extract import prompt_for
     from rag_lab.llm import Llm
 
+    name, text = document()
     fields = {**CORE_FIELDS, **TRANSPORT_FIELDS}
     llm = Llm()
     schema = json_schema(fields)
-    prompt = prompt_for(fields, BASE)
+    prompt = prompt_for(fields, text)
 
     if "--nullable" in sys.argv:
         for prop in schema["properties"].values():
@@ -211,8 +226,8 @@ def part_7() -> None:
         print("СХЕМА ВОЗВРАЩЕНА К ПЕРВОЙ РЕДАКЦИИ: поле-объект допускает null.\n"
               "Смотрите на долю null — остальные показатели тут бесполезны.\n")
 
-    print(f"документ: TR-114-2026.md, {len(BASE)} символов, "
-          f"{llm.tokens(BASE)} токенов по токенизатору ЭТОЙ модели")
+    print(f"документ: {name}, {len(text)} символов, "
+          f"{llm.tokens(text)} токенов по токенизатору ЭТОЙ модели")
     print(f"промпт с описанием {len(fields)} полей: {llm.tokens(prompt)} токенов\n")
 
     reply = llm.fill(prompt, schema)
@@ -227,7 +242,7 @@ def part_7() -> None:
             continue
         filled += 1
         value = str(got["value"])
-        ok = quote_ok(BASE, got.get("quote", ""))
+        ok = quote_ok(text, got.get("quote", ""))
         passed += ok
         print(f"  {name:16s} {value[:30]:32s} {'прошла' if ok else 'ОТКЛОНЕНА':10s} "
               f"{got.get('clause') or '—'}")
@@ -245,6 +260,13 @@ def part_7() -> None:
     numeric = {MONEY, PERCENT, INT}
     for name, f in fields.items():
         got = reply.data.get(name) or {}
+        # Порядок тот же, что в db.put_field: сначала цитата, потом разбор.
+        # Нормализовать значение при непрошедшей цитате бессмысленно — оно
+        # и так не попадёт в базу, а в выводе выглядело бы принятым.
+        if got.get("value") is not None and not quote_ok(text, got.get("quote", "")):
+            print(f"  {name:16s} {f.kind:8s} {str(got.get('value'))[:10]:12s} "
+                  f"{'—':14s} -> pending: цитата не найдена в документе")
+            continue
         n = normalize(f, got.get("value"), got.get("quote", ""))
         if not n.ok:
             note = f"-> pending: {n.reason}"
@@ -269,9 +291,11 @@ def part_8() -> None:
     from rag_lab.extract import prompt_for
     from rag_lab.llm import Llm
 
+    name, text = document()
     fields = {**CORE_FIELDS, **TRANSPORT_FIELDS}
     llm = Llm()
-    schema, prompt = json_schema(fields), prompt_for(fields, BASE)
+    schema, prompt = json_schema(fields), prompt_for(fields, text)
+    print(f"документ: {name}")
 
     runs = []
     for i in range(3):
@@ -316,7 +340,13 @@ PARTS = {
 
 
 def main() -> None:
-    args = [a for a in sys.argv[1:] if not a.startswith("-")]
+    # значение --doc — имя файла, а не номер раздела: пропускаем его вместе
+    # с самим флагом, иначе «7 --doc AR-203-2026» читается как два раздела
+    argv = sys.argv[1:]
+    if "--doc" in argv:
+        i = argv.index("--doc")
+        argv = argv[:i] + argv[i + 2:]
+    args = [a for a in argv if not a.startswith("-")]
     if args:
         try:
             wanted = [int(a) for a in args]
