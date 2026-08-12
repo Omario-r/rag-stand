@@ -1,6 +1,6 @@
 #!/bin/bash
 # Qdrant для локального стенда RAG-lab. Нативный бинарник, без Docker и без root.
-# Документация стенда: ~/Development/Home/RAG/08-local-stand.md
+# Документация стенда: ~/Development/Home/RAG/research/reference/local-stand.md
 set -euo pipefail
 
 STAND="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"

@@ -6,7 +6,7 @@
 #   ./run-embedder-e5.sh mean 8082    (по умолчанию)
 #   ./run-embedder-e5.sh cls  8083
 #
-# Почему именно сборка Zenabius (замер 08.08.2026, RAG/08-local-stand.md):
+# Почему именно сборка Zenabius (замер 08.08.2026, RAG/research/reference/local-stand.md):
 #   Официального GGUF у e5 не существует — intfloat публикует только
 #   safetensors. Из любительских конвертаций годятся объявляющие
 #   архитектуру `bert`; свежая сборка cstr объявляет `xlmr`, которую

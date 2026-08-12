@@ -1,7 +1,7 @@
 """Вызов генеративной модели со структурированным выводом. Этап 7.
 
-Разбор — RAG/07-extraction.md, выбор модели — RAG/10-models.md,
-лаба — RAG/lab-07-extraction.md.
+Разбор — RAG/research/reference/extraction.md, выбор модели — RAG/research/reference/models.md,
+лаба — RAG-labs/lab-07-extraction.md.
 
 Парный модуль к `extract.py`: тот делает всё ДО и ПОСЛЕ модели (схема,
 проверка цитат, нормализация) и намеренно не знает про сервер. Этот знает
@@ -89,7 +89,7 @@ class Llm:
 
         Не берётся у эмбеддера и не считается по коэффициенту: на одном и том
         же корпусе T-lite даёт ~6 символов на токен, Qwen3-Embedding — 1,4-2,5.
-        Коэффициент — свойство пары «модель + текст» (RAG/lab-03-chunking.md).
+        Коэффициент — свойство пары «модель + текст» (RAG-labs/lab-03-chunking.md).
         """
         return len(self._post("/tokenize", {"content": text})["tokens"])
 

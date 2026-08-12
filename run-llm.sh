@@ -8,7 +8,7 @@ set -a; source "$STAND/.env"; set +a
 export LLAMA_CACHE="$STAND/models"
 
 # T-lite-it-2.1 (t-tech): русскоязычная, apache-2.0, GGUF публикует сам вендор.
-# Выбор и пять отложенных кандидатов — RAG/10-models.md.
+# Выбор и пять отложенных кандидатов — RAG/research/reference/models.md.
 #
 # ПЕРВЫЙ ЗАПУСК СКАЧИВАЕТ 6,26 ГБ в models/. Дальше берётся из кэша.
 #

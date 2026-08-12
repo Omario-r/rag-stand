@@ -1,6 +1,6 @@
 """Коллекция Qdrant: создание, загрузка чанков, доведение до индекса.
 
-Этап 4 роадмапа. Разбор решений — RAG/04-qdrant.md, лаба — RAG/lab-04-loading.md.
+Этап 4 роадмапа. Разбор решений — RAG/research/reference/qdrant.md, лаба — RAG-labs/lab-04-loading.md.
 
 Четыре вещи, ради которых этот модуль существует:
 
@@ -48,7 +48,7 @@ INDEXING_THRESHOLD = 20000
 
 # Поля payload, по которым будем фильтровать. Тип не косметика: `keyword`
 # ищет по точному совпадению значения целиком, `text` — по вхождению слова.
-# Для doc_id нужен именно keyword (RAG/04-qdrant.md).
+# Для doc_id нужен именно keyword (RAG/research/reference/qdrant.md).
 PAYLOAD_INDEXES = {
     "doc_id": models.PayloadSchemaType.KEYWORD,
     "doc_type": models.PayloadSchemaType.KEYWORD,
@@ -138,7 +138,7 @@ def upload(
     сторона — сразу после возврата данных в поиске может ещё не быть,
     поэтому дальше обязателен `finish_indexing`.
 
-    ВНИМАНИЕ, `parallel > 1`. Справочник (RAG/04-qdrant.md) советует 2–4
+    ВНИМАНИЕ, `parallel > 1`. Справочник (RAG/research/reference/qdrant.md) советует 2–4
     «потока», но qdrant-client разводит работу ПРОЦЕССАМИ, а не потоками.
     На macOS процессы порождаются через spawn, то есть дочерний заново
     импортирует главный модуль. Скрипт без `if __name__ == "__main__"`

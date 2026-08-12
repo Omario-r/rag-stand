@@ -1,6 +1,6 @@
 """Векторизация текста через llama.cpp-сервер.
 
-Этап 2 роадмапа. Разбор решений — RAG/03-embeddings.md, лаба — RAG/lab-02-embeddings.md.
+Этап 2 роадмапа. Разбор решений — RAG/research/reference/embeddings.md, лаба — RAG-labs/lab-02-embeddings.md.
 
 Три вещи, ради которых этот модуль существует:
 

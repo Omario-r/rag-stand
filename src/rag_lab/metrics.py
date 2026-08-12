@@ -1,6 +1,6 @@
 """Метрики качества поиска. Этап 5.
 
-Разбор — RAG/05-retrieval-rerank.md, лаба — RAG/lab-05-search.md.
+Разбор — RAG/research/reference/retrieval-rerank.md, лаба — RAG-labs/lab-05-search.md.
 
 Все функции принимают ранжированный список найденных идентификаторов
 и множество верных. Ничего не знают ни про Qdrant, ни про эмбеддер:

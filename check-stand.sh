@@ -1,6 +1,6 @@
 #!/bin/bash
 # Проверка стенда до всякого кода. Пять минут, экономят часы отладки.
-# Порядок проверок — из ~/Development/Home/RAG/08-local-stand.md
+# Порядок проверок — из ~/Development/Home/RAG/research/reference/local-stand.md
 set -uo pipefail
 
 STAND="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
